@@ -1,0 +1,48 @@
+# CLI / Interaction
+typer[all]
+rich
+prompt-toolkit
+
+# Agent / LLM orchestration
+langchain
+langgraph
+langchain-openai
+langchain-ollama
+langchain-groq
+langchain-community
+
+# MCP integration
+fastmcp
+
+# RAG / Indexing
+chromadb
+sentence-transformers
+langchain-text-splitters
+
+# Document parsing
+pypdf
+beautifulsoup4
+markdown
+lxml
+
+# Web search
+tavily-python
+langchain-tavily
+
+# Sessions / Config / Logging
+pydantic
+pydantic-settings
+python-dotenv
+loguru
+
+# Shell / utilities
+sh
+watchdog
+
+# Optional integrations
+GitPython
+tree-sitter
+tree-sitter-languages
+
+# Test tooling
+pytest
