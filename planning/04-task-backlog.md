@@ -9,6 +9,32 @@ Define an actionable, prioritized backlog to implement trace with clear acceptan
 
 ## Design
 
+### Progress Update (2026-03-22)
+- Completed now:
+  - Project scaffolding.
+  - CLI routing and built-ins.
+  - CLI startup branding (`ui.show_banner`, `--no-banner`).
+  - Workspace/session bootstrap.
+  - Session persistence contracts.
+  - Provider adapters (Ollama/Groq/OpenAI) with fallback manager.
+  - Managed MCP session manager for filesystem/local-knowledge/web-search servers.
+  - Filesystem MCP connection logic for official server stdio flow.
+  - LangChain local knowledge MCP server + client integration.
+  - Tavily web search MCP server + client integration.
+  - Tool router integration for filesystem, local knowledge, and web search flows.
+  - RAG indexing/retrieval baseline plus prompt augmentation on non-tool turns.
+  - Safety gate v1 runtime behavior (`blocked`/`requires_confirmation` for shell commands).
+  - CLI startup UX updates (workspace/provider/model header, resume/new session prompt, explicit tool-call status line).
+  - First-run config initialization for API keys (`.env` load + missing-key prompts + persistence).
+  - Unit and integration test foundation.
+- Still pending:
+  - Managed MCP manager lifecycle hardening (diagnostics/retry visibility).
+  - RAG index freshness automation (missing/stale rebuild behavior).
+  - Session compression implementation in runtime path.
+  - Startup/API-key diagnostics hardening for provider auth failures (e.g., Groq 403 despite expected `.env` value).
+  - Milestone 1 e2e acceptance scenario automation.
+  - Observability/reliability/CI release matrix enforcement.
+
 ### Now
 1. Project scaffolding
 - Create package structure and dependency baseline.
@@ -48,33 +74,25 @@ Define an actionable, prioritized backlog to implement trace with clear acceptan
 - Acceptance: unit suite runs in CI and covers all listed modules.
 
 ### Next
-1. Provider adapters
-- Add OpenAI, Ollama, and Groq adapters under common interface.
-- Acceptance: all adapters pass shared contract tests.
-
-2. Hybrid MCP manager
-- Add managed subprocess lifecycle and external endpoint attach logic.
-- Acceptance: can run one managed and one external MCP server in same session.
-
-3. Tool router integration
-- Route filesystem, local knowledge, and web search calls via MCP.
-- Acceptance: normalized tool results logged to session.
-
-4. RAG indexing/retrieval baseline
-- Implement ingestion, parsing, chunking, embedding, Chroma storage, and top-K retrieval.
-- Acceptance: retrieval injects relevant context into prompt for sample docs.
-
-5. Session compression policy implementation
+1. Session compression policy implementation
 - Auto-compress model-facing history every 12 turns or at 70% prompt budget, while preserving 6 recent raw turns.
 - Acceptance: prompts stay within budget and raw session files remain lossless.
 
-6. Milestone 1 e2e acceptance scenario
+2. RAG freshness automation
+- Implement deterministic missing/stale index detection and rebuild behavior.
+- Acceptance: retrieval path auto-recovers from missing/stale index states in tests.
+
+3. Milestone 1 e2e acceptance scenario
 - Implement the baseline acceptance flow (startup banner, session create, read tool call, summary, reload).
 - Acceptance: scenario passes in automated smoke test and manual verification.
 
-7. Integration test suite
-- Add integration tests for CLI startup UX, workspace bootstrap, session reload, agent loop branching, MCP routing, and transient failure retries.
+4. Integration test suite hardening
+- Expand integration tests for safety confirmations, RAG augmentation behavior, MCP reconnect, and transient failure retries.
 - Acceptance: integration suite passes with deterministic fixtures/test doubles.
+
+5. Planning/spec alignment maintenance
+- Keep technical spec/risk docs synchronized with implemented provider defaults and startup UX behavior.
+- Acceptance: no stale default-provider or MCP-state contradictions across planning docs.
 
 ### Later
 1. Observability and diagnostics
@@ -82,7 +100,7 @@ Define an actionable, prioritized backlog to implement trace with clear acceptan
 - Acceptance: key runtime events are traceable across one session.
 
 2. Reliability enhancements
-- Retry/backoff for flaky MCP endpoints and web search errors.
+- Retry/backoff for flaky MCP servers and web search errors.
 - Acceptance: transient failures degrade gracefully with user-visible status.
 
 3. Release matrix enforcement

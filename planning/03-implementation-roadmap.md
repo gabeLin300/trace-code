@@ -9,6 +9,24 @@ Deliver trace in staged milestones from a vertical-slice MVP to a hardened v1 re
 
 ## Design
 
+### Status Snapshot (2026-03-22)
+- Completed:
+  - Milestone 1 core scaffolding is implemented (CLI entrypoint, routing, built-ins, session persistence, startup banner toggle, default/fallback provider manager, filesystem MCP tool execution).
+  - Unit and integration test foundation is implemented and passing.
+  - Managed MCP session lifecycle manager is implemented for filesystem, local knowledge, and Tavily web search servers.
+  - LangChain docs RAG ingestion and retrieval paths are implemented.
+  - Prompt augmentation is implemented for non-tool LLM turns (local knowledge context + recency-triggered web context).
+  - Safety gate v1 runtime behavior is implemented (blocked and requires-confirmation statuses for shell commands).
+  - CLI startup UX enhancements are implemented (workspace/provider/model header, session resume/new prompt, tool-call indicator output).
+  - One-time API key initialization flow is implemented (loads `.env`, prompts for missing keys, persists to `.env`).
+- In progress:
+  - Reliability and diagnostics hardening for MCP and tool execution paths.
+- Remaining:
+  - Session compression in the live model-facing context path.
+  - RAG index freshness/rebuild policy automation.
+  - Observability and reliability hardening.
+  - Milestone 1 e2e acceptance automation and release matrix CI gates.
+
 ### Milestone 1 - Vertical Slice MVP
 Deliverables:
 - CLI shell with command routing and built-ins (`/help`, `/config`, `/sessions`, `/exit`).
@@ -16,7 +34,7 @@ Deliverables:
 - Workspace bootstrap and `.assistant` directory creation.
 - Session persistence/load flows.
 - LangGraph core agent loop with tool/no-tool branching.
-- Hybrid MCP manager foundation (managed + external wiring).
+- Managed MCP manager foundation for filesystem, local knowledge, and web search servers.
 - Shell safety baseline (confirm non-read by default, dangerous command blocking).
 
 Exit Criteria:
@@ -36,6 +54,7 @@ Deliverables:
 Exit Criteria:
 - RAG-backed queries return contextually relevant augmented responses.
 - MCP tool calls are logged and recover gracefully from transient failures.
+- Freshness strategy is automated and verified by tests.
 
 ### Milestone 3 - Hardening and Release Readiness
 Deliverables:
@@ -43,8 +62,9 @@ Deliverables:
 - Observability: structured logs, tool timing, error traces.
 - Robust test coverage across CLI, agent loop, session persistence, MCP, safety, and RAG.
 - Release matrix validation:
-  - Ollama Qwen3: full end-to-end suite.
-  - Groq `openai/gpt-oss-20b`: core + tool-calling + safety suite.
+  - Groq `llama-3.3-70b-versatile` (default): full end-to-end suite.
+  - Groq `llama-3.1-8b-instant` (fallback): core + tool-calling + safety suite.
+  - Ollama (optional): smoke + tool-calling contract suite.
   - OpenAI (optional): smoke + tool-calling contract suite.
 - Documentation polish and onboarding quickstart.
 

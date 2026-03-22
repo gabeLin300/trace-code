@@ -19,7 +19,7 @@ Define the baseline Milestone 1 smoke scenario that must pass before advancing p
 7. Resume prior session and verify chat/tool history consistency.
 
 ### Required Preconditions
-- Default provider route set to Ollama `qwen3:8b-instruct` (or deterministic fallback route available).
+- Default provider route set to Groq `llama-3.3-70b-versatile` (or deterministic fallback route available).
 - Workspace bootstrap and session persistence are enabled.
 - Safety policy defaults are active.
 

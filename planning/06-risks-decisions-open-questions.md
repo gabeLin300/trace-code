@@ -12,11 +12,11 @@ Capture locked design choices, major risks, mitigation plans, and unresolved que
 ### Locked Decisions
 - MVP strategy: **vertical slice**.
 - Agent orchestration: **LangGraph core loop**.
-- MCP model: **hybrid** (managed subprocess + external endpoints).
+- MCP model: **managed local subprocess servers** (filesystem, LangChain docs, Tavily web search).
 - LLM providers: **parallel support** for OpenAI, Ollama, and Groq.
-- Default model route: **Ollama `qwen3:8b-instruct`**.
-- Secondary Ollama fallback tag if needed: **`qwen3:14b-instruct`**.
-- Fallback route: **Groq `openai/gpt-oss-20b`**.
+- Default model route: **Groq `llama-3.3-70b-versatile`**.
+- Fallback route: **Groq `llama-3.1-8b-instant`**.
+- Ollama usage: **optional**, only when explicitly selected by user/config.
 - OpenAI usage: **optional**, only when explicitly selected by user/config.
 - Safety default: **confirm all non-read commands**.
 - Optional safety override: **read-only mode** for fully non-mutating workflows.
@@ -30,8 +30,9 @@ Capture locked design choices, major risks, mitigation plans, and unresolved que
 - Session compression policy: **auto-compress every 12 turns or at 70% prompt budget**, while keeping the most recent 6 turns raw in prompt context.
 - History retention policy: **never delete raw session history on disk**; compression applies only to model-facing context.
 - Release test matrix policy:
-  - Ollama `qwen3:8b-instruct` (default path): full end-to-end suite.
-  - Groq `openai/gpt-oss-20b` (fallback path): core + tool-calling + safety suite.
+  - Groq `llama-3.3-70b-versatile` (default path): full end-to-end suite.
+  - Groq `llama-3.1-8b-instant` (fallback path): core + tool-calling + safety suite.
+  - Ollama (optional path): smoke + tool-calling contract suite.
   - OpenAI (optional path): smoke + tool-calling contract suite.
 - Milestone 1 acceptance scenario policy: startup banner -> session create -> read tool call -> summary -> session reload must pass before phase completion.
 - Testing policy: use unit + integration + e2e pyramid, with provider release-gate matrix as the hard release criterion.
@@ -42,7 +43,7 @@ Capture locked design choices, major risks, mitigation plans, and unresolved que
 - Mitigation: strict normalized response adapter contract with conformance tests.
 
 2. MCP availability and reliability
-- Risk: server startup failure, endpoint instability, tool discovery mismatch.
+- Risk: server startup failure, process instability, tool discovery mismatch.
 - Mitigation: health checks, retries, startup diagnostics, and clear degraded-mode messaging.
 
 3. Unsafe command execution
@@ -59,6 +60,13 @@ Capture locked design choices, major risks, mitigation plans, and unresolved que
 
 ### Open Questions
 - No unresolved blocking questions at this time.
+
+### Current Gaps (Execution Tracking)
+- Managed MCP lifecycle still needs hardening (diagnostics and richer recovery behavior).
+- RAG freshness automation is still pending (missing/stale rebuild strategy in runtime).
+- Session compression policy is locked in plan but not yet wired into live context build path.
+- Provider auth diagnostics still need hardening (explicit detection/reporting for `.env`/runtime key mismatches causing Groq 403 responses).
+- Release matrix CI enforcement and observability stack are still pending.
 
 ## Acceptance Criteria
 - Decisions are explicit and cross-document consistent.

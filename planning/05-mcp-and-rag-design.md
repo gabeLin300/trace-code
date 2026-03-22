@@ -9,22 +9,29 @@ Define concrete design for tool execution through MCP and retrieval-augmented co
 
 ## Design
 
-### MCP Runtime Model (Hybrid)
-Two supported server modes:
+### Implementation Status (2026-03-22)
+- Implemented:
+  - Filesystem MCP stdio client wiring for `@modelcontextprotocol/server-filesystem` initialize + tools/list + tools/call flow.
+  - Filesystem tool execution path (`list files`, `read file`) uses MCP connection logic first.
+  - Managed MCP lifecycle manager for filesystem, local knowledge, and web search clients (session startup/shutdown + reconnect-on-failure).
+  - Local knowledge MCP and Tavily web search MCP tool-call integration in runtime path.
+  - RAG ingestion/index/query baseline for LangChain docs.
+  - Prompt augmentation path using local knowledge context and recency-triggered web context.
+- Not implemented yet:
+  - Rich diagnostics around MCP lifecycle events and retry metadata surfacing.
+  - RAG index freshness automation (deterministic stale-index detection and rebuild policy).
+
+### MCP Runtime Model (Managed Local Servers)
+Supported server mode:
 1. **Managed mode**
 - trace launches MCP servers as subprocesses from config.
 - Performs health checks and reconnection attempts.
 - Handles shutdown cleanup on CLI exit.
 
-2. **External mode**
-- trace connects to existing MCP endpoints.
-- Validates connectivity and tool availability at startup.
-- Does not manage remote process lifecycle.
-
 ### MCP Tool Responsibilities
 - Filesystem MCP: workspace-scoped file operations.
 - Local knowledge MCP: documentation indexing/search interfaces.
-- Web search MCP: external web lookup interface, invoked when the agent determines it is needed.
+- Web search MCP: Tavily-backed web lookup interface, invoked when the agent determines it is needed.
 
 ### Tool Routing
 - Agent emits a normalized tool request.
@@ -66,7 +73,7 @@ Two supported server modes:
 - Allow manual reindex command in future CLI expansion.
 
 ## Acceptance Criteria
-- Managed and external MCP servers both function in the same deployment model.
+- Managed filesystem/local-knowledge/web-search MCP servers function in the same runtime model.
 - Tool routing reliably returns normalized results.
 - RAG pipeline supports end-to-end ingest and retrieval for supported doc types.
 - Index freshness behavior is deterministic and testable.

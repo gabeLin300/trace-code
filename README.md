@@ -1,46 +1,121 @@
 # trace-code
 
-`trace-code` is a modular CLI coding assistant design focused on safe tool execution, multi-LLM reasoning, MCP integration, session persistence, and retrieval-augmented context.
-
-## Planning Docs
-- [01 - Architecture Overview](planning/01-architecture-overview.md)
-- [02 - Technical Spec](planning/02-technical-spec.md)
-- [03 - Implementation Roadmap](planning/03-implementation-roadmap.md)
-- [04 - Task Backlog](planning/04-task-backlog.md)
-- [05 - MCP and RAG Design](planning/05-mcp-and-rag-design.md)
-- [06 - Risks, Decisions, Open Questions](planning/06-risks-decisions-open-questions.md)
-- [07 - End-to-End Acceptance Scenario](planning/07-end-to-end-acceptance-scenario.md)
-
-## Baseline Decisions
-- Vertical-slice MVP
-- LangGraph core agent loop
-- Hybrid MCP model (managed + external)
-- Parallel OpenAI/Ollama/Groq support
-- Default model route: Ollama Qwen3
-- Default Ollama model tag: `qwen3:8b-instruct`
-- Secondary Ollama tag fallback: `qwen3:14b-instruct`
-- Fallback model route: Groq `openai/gpt-oss-20b`
-- OpenAI models are optional and user-selected
-- Confirm non-read commands by default
-- Optional read-only safety mode
+`trace-code` is a CLI coding assistant with:
+- Filesystem tools (workspace-scoped)
+- LangChain docs retrieval (local vector index)
+- Tavily web search
 - Session persistence in `.assistant/sessions/`
-- RAG pipeline: parse/chunk/embed/vector search
+- Safety confirmations for non-read shell commands
 
-## Minimal Config Example
-```toml
-[llm]
-default = "ollama:qwen3:8b-instruct"
-ollama_fallback = "ollama:qwen3:14b-instruct"
-fallback = "groq:openai/gpt-oss-20b"
-openai_enabled = false
+## Requirements
+- Python 3.11+
+- Node.js + `npx` (used by filesystem MCP server)
+- Groq API key (default model route uses Groq)
+- Optional provider/API keys:
+  - `GROQ_API_KEY` (required for default/fallback LLM routes)
+  - `OLLAMA_BASE_URL` (only if you reconfigure to Ollama)
+  - `OPENAI_API_KEY` (if using OpenAI)
+  - `TAVILY_API_KEY` (for web search)
 
-[mcp]
-mode = "hybrid"
+## Install
+```bash
+git clone <repo-url>
+cd <repo-folder>
+python -m venv .venv
+source .venv/bin/activate
+pip install -U pip setuptools wheel
+pip install -e .
+```
 
-[ui]
-show_banner = true
+If your environment does not resolve all extras from `pyproject.toml`, install:
+```bash
+pip install -r requirements.txt
+```
 
-[safety]
-confirm_non_read = true
-read_only = false
+## Run
+```bash
+trace
+```
+
+Useful flags:
+```bash
+trace --session-id main
+trace --no-banner
+```
+
+On first startup, `trace` checks for required API keys in `.env` (and current environment).  
+If missing, it prompts you once and writes provided values into `.env` in your current workspace.
+
+## Built-in Commands
+- `/help`
+- `/config`
+- `/sessions`
+- `/exit`
+
+## Usage Examples
+Filesystem:
+- `list files`
+- `read file README.md`
+
+LangChain docs knowledge:
+- `ingest langchain docs max pages 30`
+- `search langchain docs for retrieval qa`
+
+Web search:
+- `search web for latest langchain release`
+
+Shell with safety:
+- `run command git status` (read command, runs directly)
+- `run command touch demo.txt` (returns confirmation required)
+- `confirm run command touch demo.txt` (runs after confirmation)
+
+## Data Locations
+- Sessions: `.assistant/sessions/`
+- Logs: `.assistant/logs/`
+- Vector store: `.assistant/vector_db/`
+
+## Troubleshooting
+- `trace: command not found`
+  - Make sure the virtual environment is active: `source .venv/bin/activate`
+  - Reinstall entrypoint: `pip install -e .`
+
+- `pytest` or package import errors after install
+  - Install full dependency set: `pip install -r requirements.txt`
+
+- Filesystem tool errors mentioning MCP server startup
+  - Ensure Node.js and `npx` are installed and available in `PATH`.
+  - Test `npx` manually: `npx --version`
+
+- Web search fails with missing Tavily key
+  - Set `TAVILY_API_KEY` in your shell, or run search once and enter key when prompted.
+  - Non-interactive mode uses `--no-prompt`, so key must already be set.
+
+- No results from LangChain docs search
+  - Run ingestion first: `ingest langchain docs max pages 30`
+  - Then query: `search langchain docs for <topic>`
+
+- Slow first-time RAG indexing
+  - First run may download embedding/model assets; subsequent runs are faster.
+
+## Uninstall
+If installed in a project virtual environment:
+
+```bash
+cd <repo-folder>
+source .venv/bin/activate
+pip uninstall trace-code
+deactivate
+```
+
+To fully remove the local environment and repo files:
+
+```bash
+cd <parent-folder>
+rm -rf <repo-folder>
+```
+
+Optional: remove generated assistant data from any workspace where you ran `trace`:
+
+```bash
+rm -rf /path/to/workspace/.assistant
 ```

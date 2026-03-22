@@ -28,9 +28,7 @@ Define the high-level architecture for `trace`, a modular CLI coding assistant t
 - Applies token budget management and context pruning before model calls.
 
 4. **Tool Execution Layer (MCP + local wrappers)**
-- Uses a hybrid MCP model:
-  - Managed subprocess servers (started/stopped by trace).
-  - External servers (pre-existing endpoints attached by config).
+- Uses managed local MCP subprocess servers (started/stopped by trace).
 - Routes tool calls to filesystem, local knowledge, and web search capabilities.
 - Local wrappers support shell execution and planning actions.
 
@@ -46,7 +44,7 @@ Define the high-level architecture for `trace`, a modular CLI coding assistant t
 3. Workspace is detected from current directory.
 4. `.assistant/` directories are created if missing.
 5. Config and API keys are loaded/validated.
-6. MCP servers are started/attached (hybrid mode).
+6. MCP servers are started (managed mode).
 7. Session is resumed or initialized.
 8. RAG index is built or refreshed when needed.
 9. Agent loop processes user requests until completion/exit.
@@ -61,7 +59,7 @@ Define the high-level architecture for `trace`, a modular CLI coding assistant t
 - Architecture clearly separates responsibilities across CLI, agent, context/session, tool routing, and RAG.
 - Startup and runtime flow are explicit and implementable.
 - Safety defaults are specified and consistent with other planning docs.
-- MCP hybrid model and multi-LLM support are represented at the architecture level.
+- Managed MCP model and multi-LLM support are represented at the architecture level.
 
 ## Notes
 This architecture is optimized for a vertical-slice MVP while preserving extension points for deeper automation, additional tools, and provider evolution.

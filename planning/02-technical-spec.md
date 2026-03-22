@@ -21,16 +21,18 @@ All non-built-in input is sent to the agent loop.
 Startup UX:
 - Render an ASCII `trace` logo/banner at interactive CLI startup.
 - Support disabling banner via config (`ui.show_banner=false`) and runtime flag (`--no-banner`) for automation/scripting.
+- Display workspace root, active provider, and active model on startup.
+- When sessions already exist, prompt user to resume current session or create a new session.
 
 ### Config Contract (`TraceSettings`)
 Required top-level groups:
 - `workspace`: root detection and `.assistant` path behavior.
 - `llm`: provider selection and model config for OpenAI/Ollama/Groq.
-  - Default model route: Ollama `qwen3:8b-instruct` (pinned tag for reproducibility).
-  - Secondary Ollama fallback tag (if default unavailable): `qwen3:14b-instruct`.
-  - Fallback route: Groq `openai/gpt-oss-20b`.
+  - Default model route: Groq `llama-3.3-70b-versatile`.
+  - Fallback route: Groq `llama-3.1-8b-instant`.
+  - Ollama models are optional and used only when explicitly selected by the user/config.
   - OpenAI models are optional and used only when explicitly selected by the user/config.
-- `mcp`: server definitions with `mode` (`managed` or `external`), startup command or endpoint.
+- `mcp`: server definitions for managed local subprocess servers.
 - `ui`: CLI presentation settings (including `show_banner`).
 - `web_search`: enablement and invocation policy (`when_needed` default).
 - `retry`: transient tool retry settings (`max_attempts=3`) and fixed defaults:
@@ -41,6 +43,7 @@ Required top-level groups:
 - `safety`: `confirm_non_read` (default true), `read_only` (default false), blocked patterns.
 - `rag`: ingest targets, chunking settings, embedding provider, `top_k`.
 - `sessions`: active session behavior and persistence path.
+- Startup initialization: load `.env`; prompt for missing required API keys once and persist them to `.env`.
 
 ### Session Contract (`SessionRecord`)
 Persist in `.assistant/sessions/<session_id>.json`:
@@ -89,20 +92,21 @@ Provider adapters must expose a shared contract:
 - `normalize_response(raw)`
 
 Supported providers in v1:
-- Ollama (default): `qwen3:8b-instruct`
-- Groq (fallback): `openai/gpt-oss-20b`
+- Groq (default): `llama-3.3-70b-versatile`
+- Groq (fallback): `llama-3.1-8b-instant`
+- Ollama (optional): only when explicitly selected
 - OpenAI (optional): only when explicitly selected
 
 All providers must map to a common response format for the agent loop.
 
 Release gate test matrix:
-- Ollama Qwen3 (default): full end-to-end suite.
-- Groq `openai/gpt-oss-20b` (fallback): core + tool-calling + safety suite.
+- Groq `llama-3.3-70b-versatile` (default): full end-to-end suite.
+- Groq `llama-3.1-8b-instant` (fallback): core + tool-calling + safety suite.
+- Ollama (optional): smoke + tool-calling contract suite.
 - OpenAI (optional): smoke + tool-calling contract suite.
 
-### MCP Integration (Hybrid)
+### MCP Integration (Managed Local)
 - `managed`: trace starts, monitors, and stops subprocess MCP servers.
-- `external`: trace attaches to user-provided endpoint(s).
 - Tool router dispatches requests to filesystem, local knowledge, or web search capabilities.
 - Web search is enabled when needed based on agent/tool-routing decision.
 - Transient MCP/tool failures retry up to 3 attempts with `1s/2s/4s` delays, +/-25% jitter, `8s` single-wait cap, and `10s` total-wait cap.
@@ -140,8 +144,9 @@ Integration tests (critical subsystem paths):
 End-to-end smoke tests (release gates):
 - Milestone 1 baseline interactive flow from `07-end-to-end-acceptance-scenario.md`.
 - Provider matrix gates:
-  - Ollama `qwen3:8b-instruct`: full e2e suite.
-  - Groq `openai/gpt-oss-20b`: core + tool-calling + safety suite.
+  - Groq `llama-3.3-70b-versatile`: full e2e suite.
+  - Groq `llama-3.1-8b-instant`: core + tool-calling + safety suite.
+  - Ollama (optional): smoke + tool-calling contract suite.
   - OpenAI (optional): smoke + tool-calling contract suite.
 
 ## Acceptance Criteria
