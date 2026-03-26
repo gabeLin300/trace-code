@@ -138,3 +138,40 @@ def test_index_and_search_langchain_docs_with_fake_chroma(monkeypatch, tmp_path:
 def test_search_requires_non_empty_query(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="must not be empty"):
         kb.search_langchain_docs("  ", persist_dir=tmp_path)
+
+
+def test_search_uses_fusion_retrieval_and_rrf(monkeypatch, tmp_path: Path) -> None:
+    class FakeCollection:
+        def query(self, query_texts, n_results, include):
+            q = query_texts[0]
+            if "tutorial guide" in q:
+                return {
+                    "documents": [["Doc B", "Doc C"]],
+                    "metadatas": [[{"source_url": "b"}, {"source_url": "c"}]],
+                    "distances": [[0.10, 0.20]],
+                }
+            if "example code" in q:
+                return {
+                    "documents": [["Doc A", "Doc C"]],
+                    "metadatas": [[{"source_url": "a"}, {"source_url": "c"}]],
+                    "distances": [[0.30, 0.15]],
+                }
+            return {
+                "documents": [["Doc A", "Doc B"]],
+                "metadatas": [[{"source_url": "a"}, {"source_url": "b"}]],
+                "distances": [[0.12, 0.18]],
+            }
+
+    monkeypatch.setattr(kb, "_chroma_collection", lambda persist_dir, collection_name: FakeCollection())
+
+    result = kb.search_langchain_docs(
+        "langchain retriever",
+        persist_dir=tmp_path / "vector_db",
+        top_k=2,
+    )
+
+    assert result["advanced_retrieval"] == "fusion"
+    assert len(result["fusion_queries"]) >= 3
+    sources = [item["metadata"]["source_url"] for item in result["results"]]
+    assert set(sources) == {"a", "b"}
+    assert all("fusion_score" in item for item in result["results"])

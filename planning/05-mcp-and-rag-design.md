@@ -16,6 +16,7 @@ Define concrete design for tool execution through MCP and retrieval-augmented co
   - Managed MCP lifecycle manager for filesystem, local knowledge, and web search clients (session startup/shutdown + reconnect-on-failure).
   - Local knowledge MCP and Tavily web search MCP tool-call integration in runtime path.
   - RAG ingestion/index/query baseline for LangChain docs.
+  - Advanced RAG technique: Fusion Retrieval (RAG-Fusion style reciprocal-rank fusion of multi-query retrieval).
   - Prompt augmentation path using local knowledge context and recency-triggered web context.
 - Not implemented yet:
   - Rich diagnostics around MCP lifecycle events and retry metadata surfacing.
@@ -63,8 +64,9 @@ Supported server mode:
 - Persist vectors in Chroma under `.assistant/vector_db`.
 
 6. **Query-time Retrieval**
-- Rewrite/expand user query.
-- Run top-K vector search.
+- Rewrite/expand user query into multiple variants.
+- Run top-K vector search per variant.
+- Fuse results with reciprocal-rank fusion (RRF) to improve recall and ranking robustness.
 - Inject relevant chunks into model context.
 
 ### Index Freshness Strategy

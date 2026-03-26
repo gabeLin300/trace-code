@@ -22,6 +22,7 @@ Capture locked design choices, major risks, mitigation plans, and unresolved que
 - Optional safety override: **read-only mode** for fully non-mutating workflows.
 - Session persistence location: `.assistant/sessions/`.
 - RAG model: parse -> chunk -> embed -> vector search (top-K augmentation).
+- Advanced RAG technique: Fusion Retrieval (RAG-Fusion with reciprocal-rank fusion over multiple rewritten queries).
 - Web search policy: **enabled when needed** by the agent/tool router.
 - MCP retry policy: **at most 3 attempts** with `1s/2s/4s` backoff, +/-25% jitter, `8s` max single wait, and `10s` max total wait budget per call.
 - Shell safety classification defaults:

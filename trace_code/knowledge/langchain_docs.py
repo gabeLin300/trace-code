@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
 from html.parser import HTMLParser
+import math
 from pathlib import Path
 from typing import Any
 from urllib.parse import urldefrag, urljoin, urlparse
@@ -292,28 +293,90 @@ def search_langchain_docs(
         raise ValueError("query must not be empty")
 
     collection = _chroma_collection(persist_dir, collection_name)
-    result = collection.query(query_texts=[query], n_results=top_k, include=["documents", "metadatas", "distances"])
-
-    docs = result.get("documents", [[]])
-    metas = result.get("metadatas", [[]])
-    dists = result.get("distances", [[]])
-
-    items: list[dict[str, Any]] = []
-    for i, text in enumerate(docs[0] if docs else []):
-        metadata = (metas[0][i] if metas and metas[0] and i < len(metas[0]) else {}) or {}
-        distance = dists[0][i] if dists and dists[0] and i < len(dists[0]) else None
-        items.append(
-            {
-                "text": text,
-                "metadata": metadata,
-                "distance": distance,
-            }
-        )
+    fusion_queries = _build_fusion_queries(query)
+    per_query_results: list[list[dict[str, Any]]] = []
+    for q in fusion_queries:
+        result = collection.query(query_texts=[q], n_results=max(top_k, 6), include=["documents", "metadatas", "distances"])
+        per_query_results.append(_query_rows_to_items(result))
+    items = _reciprocal_rank_fusion(per_query_results, top_k=top_k)
 
     return {
         "status": "ok",
         "query": query,
+        "advanced_retrieval": "fusion",
+        "fusion_queries": fusion_queries,
         "results": items,
         "collection": collection_name,
         "persist_dir": str(persist_dir),
     }
+
+
+def _query_rows_to_items(result: dict[str, Any]) -> list[dict[str, Any]]:
+    docs = result.get("documents", [[]])
+    metas = result.get("metadatas", [[]])
+    dists = result.get("distances", [[]])
+
+    rows: list[dict[str, Any]] = []
+    for i, text in enumerate(docs[0] if docs else []):
+        metadata = (metas[0][i] if metas and metas[0] and i < len(metas[0]) else {}) or {}
+        distance = dists[0][i] if dists and dists[0] and i < len(dists[0]) else None
+        rows.append({"text": text, "metadata": metadata, "distance": distance})
+    return rows
+
+
+def _build_fusion_queries(query: str) -> list[str]:
+    trimmed = " ".join(query.split())
+    variants = [
+        trimmed,
+        f"{trimmed} tutorial guide",
+        f"{trimmed} example code",
+        f"{trimmed} best practices",
+    ]
+    seen: set[str] = set()
+    unique: list[str] = []
+    for item in variants:
+        key = item.lower().strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique
+
+
+def _reciprocal_rank_fusion(result_sets: list[list[dict[str, Any]]], *, top_k: int, k: int = 60) -> list[dict[str, Any]]:
+    if not result_sets:
+        return []
+
+    scored: dict[str, dict[str, Any]] = {}
+    for rows in result_sets:
+        for rank, row in enumerate(rows, start=1):
+            text = str(row.get("text", "")).strip()
+            metadata = row.get("metadata", {}) or {}
+            source = str(metadata.get("source_url", ""))
+            dedupe_key = f"{source}::{text}"
+
+            slot = scored.setdefault(
+                dedupe_key,
+                {
+                    "text": text,
+                    "metadata": metadata,
+                    "distance": row.get("distance"),
+                    "fusion_score": 0.0,
+                },
+            )
+            slot["fusion_score"] += 1.0 / float(k + rank)
+
+            current_distance = row.get("distance")
+            best_distance = slot.get("distance")
+            if isinstance(current_distance, (int, float)):
+                if not isinstance(best_distance, (int, float)) or current_distance < best_distance:
+                    slot["distance"] = float(current_distance)
+
+    ordered = sorted(
+        scored.values(),
+        key=lambda item: (
+            -float(item.get("fusion_score", 0.0)),
+            float(item.get("distance")) if isinstance(item.get("distance"), (int, float)) else math.inf,
+        ),
+    )
+    return ordered[:top_k]

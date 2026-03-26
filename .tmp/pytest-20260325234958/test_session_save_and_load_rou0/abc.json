@@ -1,0 +1,15 @@
+{
+  "session_id": "abc",
+  "created_at": "2026-03-26T03:50:01.022686+00:00",
+  "updated_at": "2026-03-26T03:50:01.022686+00:00",
+  "chat_history": [
+    {
+      "role": "user",
+      "content": "hi"
+    }
+  ],
+  "command_history": [],
+  "tool_history": [],
+  "task_plan": {},
+  "metadata": {}
+}

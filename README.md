@@ -3,6 +3,7 @@
 `trace-code` is a CLI coding assistant with:
 - Filesystem tools (workspace-scoped)
 - LangChain docs retrieval (local vector index)
+- Advanced RAG: Fusion Retrieval (RAG-Fusion style reciprocal-rank fusion)
 - Tavily web search
 - Session persistence in `.assistant/sessions/`
 - Safety confirmations for non-read shell commands
@@ -50,6 +51,7 @@ If missing, it prompts you once and writes provided values into `.env` in your c
 - `/help`
 - `/config`
 - `/sessions`
+- `/health`
 - `/exit`
 
 ## Usage Examples

@@ -70,7 +70,7 @@ Normalized return shape from all tools:
 - `duration_ms`
 - `timestamp`
 
-### Agent State Machine (LangGraph)
+### Agent State Machine (Bounded Autonomous Loop)
 Primary states:
 1. `build_context`
 2. `enforce_token_budget`
@@ -83,7 +83,7 @@ Primary states:
 Behavior:
 - If tool is requested, route through tool router and append structured results.
 - If no tool is required, produce final answer and persist turn state.
-- Iteration continues until completion criteria or guard limits are reached.
+- Iteration continues until completion criteria or guard limits are reached (`max_steps`).
 
 ### LLM Provider Interface
 Provider adapters must expose a shared contract:

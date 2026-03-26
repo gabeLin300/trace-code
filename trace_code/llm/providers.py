@@ -31,7 +31,7 @@ class GroqProvider(LLMProvider):
     name = "groq"
 
     def __init__(self, api_key: str | None = None, base_url: str | None = None):
-        self.api_key = api_key or os.getenv("GROQ_API_KEY")
+        self.api_key = _clean_api_key(api_key or os.getenv("GROQ_API_KEY"))
         self.base_url = (base_url or os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")).rstrip("/")
 
     def generate(self, prompt: str, model: str) -> LLMResponse:
@@ -56,7 +56,7 @@ class OpenAIProvider(LLMProvider):
     name = "openai"
 
     def __init__(self, api_key: str | None = None, base_url: str | None = None):
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.api_key = _clean_api_key(api_key or os.getenv("OPENAI_API_KEY"))
         self.base_url = (base_url or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")).rstrip("/")
 
     def generate(self, prompt: str, model: str) -> LLMResponse:
@@ -78,7 +78,11 @@ class OpenAIProvider(LLMProvider):
 
 
 def _post_json(url: str, body: dict, api_key: str | None) -> dict:
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "trace-code/0.1",
+    }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
@@ -92,7 +96,20 @@ def _post_json(url: str, body: dict, api_key: str | None) -> dict:
         with request.urlopen(req, timeout=30) as response:
             raw = response.read().decode("utf-8")
             return json.loads(raw)
-    except (error.HTTPError, error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+    except error.HTTPError as exc:
+        details = ""
+        try:
+            details = exc.read().decode("utf-8", errors="replace").strip()
+        except Exception:
+            details = ""
+        hint = ""
+        if exc.code in {401, 403}:
+            hint = " (auth failed: verify API key, provider account access, and model permission)"
+        msg = f"request failed for {url}: HTTP {exc.code}{hint}"
+        if details:
+            msg = f"{msg}; {details}"
+        raise ProviderError(msg) from exc
+    except (error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise ProviderError(f"request failed for {url}: {exc}") from exc
 
 
@@ -105,3 +122,12 @@ def _extract_chat_content(payload: dict) -> str:
     if not content:
         raise ProviderError("chat completion response missing content")
     return content
+
+
+def _clean_api_key(value: str | None) -> str | None:
+    if value is None:
+        return None
+    key = value.strip()
+    if len(key) >= 2 and ((key[0] == '"' and key[-1] == '"') or (key[0] == "'" and key[-1] == "'")):
+        key = key[1:-1].strip()
+    return key or None

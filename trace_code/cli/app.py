@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Callable
 
-from trace_code.agent.loop import run_turn
+from trace_code.agent.loop import run_agentic_task
 from trace_code.cli.banner import render_banner
 from trace_code.cli.router import route_user_input
 from trace_code.config import TraceSettings
+from trace_code.llm.base import ProviderError, ProviderSelectionError
+from trace_code.llm.manager import LLMManager
 from trace_code.llm.manager import parse_provider_route
 from trace_code.mcp.manager import MCPManager
 from trace_code.sessions.store import SessionRecord, SessionStore
-from trace_code.tools.executor import prompt_requests_tool
 from trace_code.workspace.bootstrap import bootstrap_workspace
 
 
@@ -31,6 +33,7 @@ HELP_TEXT = (
     "  /help      Show command usage\n"
     "  /config    Show active configuration summary\n"
     "  /sessions  Show current session details\n"
+    "  /health    Run provider/auth diagnostics\n"
     "  /exit      Exit the CLI"
 )
 
@@ -79,10 +82,6 @@ def _summarize_config(settings: TraceSettings) -> str:
 def _sessions_text(ctx: CLIContext) -> str:
     state = "resumed" if ctx.resumed else "new"
     return f"session_id={ctx.session.session_id} ({state})\nsessions_dir={ctx.sessions_dir}"
-
-
-def _guess_wants_tool(user_input: str) -> bool:
-    return prompt_requests_tool(user_input)
 
 
 def _startup_header_text(settings: TraceSettings) -> str:
@@ -137,9 +136,54 @@ def _handle_builtin(command: str, ctx: CLIContext) -> tuple[str, bool]:
         return _summarize_config(ctx.settings), False
     if command == "/sessions":
         return _sessions_text(ctx), False
+    if command == "/health":
+        return _provider_health_text(ctx), False
     if command == "/exit":
         return "Exiting trace.", True
     return f"Unknown command: {command}", False
+
+
+def _mask_key(raw: str) -> str:
+    key = raw.strip()
+    if not key:
+        return "(missing)"
+    if len(key) <= 8:
+        return "*" * len(key)
+    return f"{key[:4]}...{key[-4:]} (len={len(key)})"
+
+
+def _provider_health_text(ctx: CLIContext) -> str:
+    settings = ctx.settings
+    manager = LLMManager(settings)
+    default_route = settings.llm.default
+    fallback_route = settings.llm.fallback
+
+    groq_key = _mask_key(os.getenv("GROQ_API_KEY", ""))
+    tavily_key = _mask_key(os.getenv(settings.web_search.api_key_env_var, ""))
+
+    lines = [
+        f"GROQ_API_KEY={groq_key}",
+        f"{settings.web_search.api_key_env_var}={tavily_key}",
+        f"default_route={default_route}",
+        f"fallback_route={fallback_route}",
+    ]
+    if ctx.mcp_manager is not None:
+        health = ctx.mcp_manager.health()
+        lines.append(
+            "mcp_health="
+            f"filesystem:{health.filesystem},"
+            f"local_knowledge:{health.local_knowledge},"
+            f"web_search:{health.web_search}"
+        )
+
+    for label, route in (("default", default_route), ("fallback", fallback_route)):
+        try:
+            res = manager.generate("health check", provider_override=route)
+            lines.append(f"{label}: ok ({res.provider}:{res.model})")
+        except (ProviderError, ProviderSelectionError) as exc:
+            lines.append(f"{label}: error ({route}) -> {exc}")
+
+    return "\n".join(lines)
 
 
 def start_cli(settings: TraceSettings, no_banner: bool = False, session_id: str = "default") -> dict:
@@ -184,25 +228,31 @@ def run_interactive_session(
                     break
                 continue
 
-            wants_tool = _guess_wants_tool(user_input)
-            result = run_turn(
+            result = run_agentic_task(
                 user_input=user_input,
-                wants_tool=wants_tool,
                 settings=ctx.settings,
                 mcp_manager=ctx.mcp_manager,
             )
-            if wants_tool:
-                output_fn(f"\ncalling tool: {result['tool']}\n")
             response = result["response"]
+            for tool_step in result.get("tools", []):
+                output_fn(f"\n[{tool_step.get('step')}] calling tool: {tool_step.get('tool_name')}\n")
 
             ctx.session.chat_history.append({"role": "user", "content": user_input})
             ctx.session.chat_history.append({"role": "assistant", "content": response})
 
-            if result.get("tool"):
+            for tool_step in result.get("tools", []):
+                ctx.session.tool_history.append(
+                    {
+                        "tool_name": tool_step.get("tool_name", "unknown"),
+                        "status": tool_step.get("status", result.get("status", "unknown")),
+                        "output": tool_step.get("output", ""),
+                    }
+                )
+            if result.get("tool") and not result.get("tools"):
                 ctx.session.tool_history.append(
                     {
                         "tool_name": result.get("tool", "unknown"),
-                        "status": result["status"],
+                        "status": result.get("status", "unknown"),
                         "output": response,
                     }
                 )

@@ -15,10 +15,13 @@ Deliver trace in staged milestones from a vertical-slice MVP to a hardened v1 re
   - Unit and integration test foundation is implemented and passing.
   - Managed MCP session lifecycle manager is implemented for filesystem, local knowledge, and Tavily web search servers.
   - LangChain docs RAG ingestion and retrieval paths are implemented.
+  - Fusion Retrieval (advanced RAG technique) is implemented for local knowledge search.
   - Prompt augmentation is implemented for non-tool LLM turns (local knowledge context + recency-triggered web context).
+  - Bounded autonomous multi-step task loop is implemented (tool execution + LLM decide-next-step iteration).
   - Safety gate v1 runtime behavior is implemented (blocked and requires-confirmation statuses for shell commands).
   - CLI startup UX enhancements are implemented (workspace/provider/model header, session resume/new prompt, tool-call indicator output).
   - One-time API key initialization flow is implemented (loads `.env`, prompts for missing keys, persists to `.env`).
+  - Planning diagram artifacts were added (state diagram and multi-scenario sequence diagrams).
 - In progress:
   - Reliability and diagnostics hardening for MCP and tool execution paths.
 - Remaining:

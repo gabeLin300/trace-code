@@ -18,7 +18,7 @@ Define the high-level architecture for `trace`, a modular CLI coding assistant t
 - Renders an ASCII `trace` logo on startup (configurable for non-interactive/scripting use).
 
 2. **Agent / Reasoning Layer**
-- Uses a LangGraph-driven loop: context build -> reason -> tool decision -> execute -> iterate.
+- Uses a bounded autonomous loop: context build -> tool/answer decision -> execute -> iterate until done/limit.
 - Supports no-tool and tool-call branches.
 - Includes planning capability for multi-step tasks.
 
