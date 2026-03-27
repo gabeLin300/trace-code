@@ -57,14 +57,39 @@ def run_agentic_task(
         _emit_debug(debug_fn, f"loop step {step_idx} planning end action={decision.get('action')}")
         steps.append({"step": step_idx, "kind": "decision", **decision})
         if decision["action"] == "final":
-            _emit_debug(debug_fn, f"loop step {step_idx} finalize done")
-            return _finalize_result(
-                status="answered" if not tools else "answered_with_tools",
-                response=decision["payload"],
-                steps=steps,
-                tools=tools,
-                stop_reason="done",
+            final_eval = _evaluate_final_completion(
+                user_input=user_input,
+                response=str(decision.get("payload", "")),
+                used_tools=bool(tools),
             )
+            steps.append({"step": step_idx, "kind": "evaluation", "phase": "final", **final_eval})
+            if (
+                not final_eval["is_complete"]
+                and step_idx < max_steps
+                and prompt_requests_tool(user_input)
+            ):
+                # Keep autonomy: when final response looks incomplete for a tool-oriented goal,
+                # force one tool-attempt from the original request before giving up.
+                decision = {"action": "tool", "payload": user_input, "tool_name": "", "arguments": {}}
+                steps.append(
+                    {
+                        "step": step_idx,
+                        "kind": "decision_override",
+                        "reason": "final_response_incomplete_for_tool_goal",
+                        "action": "tool",
+                        "payload": user_input,
+                    }
+                )
+            else:
+                _emit_debug(debug_fn, f"loop step {step_idx} finalize done")
+                return _finalize_result(
+                    status="answered" if not tools else "answered_with_tools",
+                    response=decision["payload"],
+                    steps=steps,
+                    tools=tools,
+                    stop_reason="done",
+                    completion=final_eval,
+                )
 
         command = decision.get("payload", "")
         tool_name = decision.get("tool_name", "")
@@ -84,6 +109,12 @@ def run_agentic_task(
                 steps=steps,
                 tools=tools,
                 stop_reason=guard["stop_reason"],
+                completion={
+                    "is_complete": False,
+                    "confidence": "low",
+                    "unmet_requirements": ["loop_guardrail_triggered"],
+                    "reason": guard["stop_reason"],
+                },
             )
 
         action_history.append(next_action_key)
@@ -111,6 +142,12 @@ def run_agentic_task(
                     "elapsed_ms": tool_result.get("elapsed_ms", 0),
                 }
             )
+            tool_eval = _evaluate_tool_progress(
+                user_input=user_input,
+                tool_name=str(tool_result.get("tool", "")),
+                tool_output=str(tool_result.get("response", "")),
+            )
+            steps.append({"step": step_idx, "kind": "evaluation", "phase": "tool", **tool_eval})
 
         if tool_result.get("status") in {"error", "blocked", "requires_confirmation"}:
             _emit_debug(debug_fn, f"loop step {step_idx} stop_reason={tool_result.get('status')}")
@@ -126,6 +163,12 @@ def run_agentic_task(
                     steps=steps,
                     tools=tools,
                     stop_reason="partial_error",
+                    completion={
+                        "is_complete": False,
+                        "confidence": "medium",
+                        "unmet_requirements": ["follow_up_tool_failed"],
+                        "reason": "partial_error",
+                    },
                 )
             return _finalize_result(
                 status=str(tool_result.get("status", "error")),
@@ -133,6 +176,12 @@ def run_agentic_task(
                 steps=steps,
                 tools=tools,
                 stop_reason="blocked" if tool_result.get("status") in {"blocked", "requires_confirmation"} else "error",
+                completion={
+                    "is_complete": False,
+                    "confidence": "low",
+                    "unmet_requirements": ["tool_execution_failed_or_blocked"],
+                    "reason": str(tool_result.get("status", "error")),
+                },
             )
 
         latest_tool_name = str(tool_result.get("tool", ""))
@@ -147,6 +196,12 @@ def run_agentic_task(
         steps=steps,
         tools=tools,
         stop_reason="step_limit",
+        completion={
+            "is_complete": False,
+            "confidence": "low",
+            "unmet_requirements": ["step_limit_reached"],
+            "reason": "step_limit",
+        },
     )
 
 
@@ -416,7 +471,10 @@ def _finalize_result(
     steps: list[dict],
     tools: list[dict],
     stop_reason: str,
+    completion: dict | None = None,
 ) -> dict:
+    if completion is None:
+        completion = _default_completion(status=status, response=response)
     return {
         "status": status,
         "response": response,
@@ -425,6 +483,7 @@ def _finalize_result(
         "tool": tools[-1]["tool_name"] if tools else None,
         "tool_status": tools[-1]["status"] if tools else None,
         "stop_reason": stop_reason,
+        "completion": completion,
     }
 
 
@@ -490,3 +549,61 @@ def _assert_tool_executable(*, tool_name: str, mcp_manager: MCPManager | None) -
 def _emit_debug(debug_fn: Callable[[str], None] | None, message: str) -> None:
     if debug_fn is not None:
         debug_fn(message)
+
+
+def _evaluate_tool_progress(*, user_input: str, tool_name: str, tool_output: str) -> dict[str, object]:
+    normalized = " ".join(tool_output.split())
+    has_signal = bool(normalized and normalized.lower() not in {"(empty)", "no matches found."})
+    confidence = "high" if has_signal else "low"
+    unmet: list[str] = []
+    if not has_signal:
+        unmet.append("tool_returned_empty_or_low_signal_output")
+    return {
+        "is_complete": False,
+        "confidence": confidence,
+        "unmet_requirements": unmet,
+        "reason": f"tool_observation:{tool_name}",
+    }
+
+
+def _evaluate_final_completion(*, user_input: str, response: str, used_tools: bool) -> dict[str, object]:
+    text = response.strip()
+    lowered = text.lower()
+    blockers = (
+        "i don't know",
+        "cannot",
+        "can't",
+        "unable",
+        "not sure",
+        "insufficient",
+    )
+    unmet: list[str] = []
+    if not text:
+        unmet.append("empty_final_response")
+    if any(b in lowered for b in blockers):
+        unmet.append("final_response_indicates_incomplete_resolution")
+    if prompt_requests_tool(user_input) and not used_tools:
+        unmet.append("tool_oriented_goal_without_tool_use")
+
+    is_complete = len(unmet) == 0
+    if is_complete:
+        confidence = "high" if len(text) >= 20 else "medium"
+    else:
+        confidence = "low" if "empty_final_response" in unmet else "medium"
+    return {
+        "is_complete": is_complete,
+        "confidence": confidence,
+        "unmet_requirements": unmet,
+        "reason": "final_response_check",
+    }
+
+
+def _default_completion(*, status: str, response: str) -> dict[str, object]:
+    if status in {"answered", "answered_with_tools"} and response.strip():
+        return {"is_complete": True, "confidence": "medium", "unmet_requirements": [], "reason": "default_finalization"}
+    return {
+        "is_complete": False,
+        "confidence": "low",
+        "unmet_requirements": ["non_answer_terminal_state"],
+        "reason": "default_finalization",
+    }
