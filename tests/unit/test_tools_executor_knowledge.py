@@ -57,6 +57,36 @@ def test_search_langchain_docs_tool(monkeypatch, tmp_path) -> None:
     assert "RetrievalQA" in result["output"]
 
 
+def test_search_langchain_docs_tool_bypasses_mcp_manager(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        executor,
+        "search_langchain_docs",
+        lambda **kwargs: {
+            "results": [
+                {
+                    "text": "Retriever memory differs from agent memory.",
+                    "metadata": {"source_url": "https://python.langchain.com/docs/concepts/memory/"},
+                    "distance": 0.07,
+                }
+            ]
+        },
+    )
+
+    class _FailingManager:
+        def search_langchain_docs(self, query, top_k, collection):
+            raise AssertionError("MCP search path should not be used")
+
+    result = executor.execute_tool_from_prompt(
+        "search langchain docs for retriever and agent memory differences",
+        workspace_root=tmp_path,
+        settings=TraceSettings(workspace_root=tmp_path),
+        mcp_manager=_FailingManager(),
+    )
+
+    assert result["tool_name"] == "knowledge.search_langchain_docs"
+    assert "agent memory" in result["output"]
+
+
 def test_search_langchain_docs_requires_query(tmp_path) -> None:
     with pytest.raises(executor.ToolExecutionError, match="missing query"):
         executor.execute_tool_from_prompt(

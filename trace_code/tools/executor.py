@@ -394,19 +394,12 @@ def _search_langchain_docs(
         raise ToolExecutionError("missing query for LangChain docs search")
 
     try:
-        if mcp_manager is not None:
-            result = mcp_manager.search_langchain_docs(
-                query=query,
-                top_k=settings.rag.top_k,
-                collection=settings.rag.langchain_docs_collection,
-            )
-        else:
-            result = search_langchain_docs(
-                query=query,
-                persist_dir=_knowledge_persist_dir(workspace_root),
-                collection_name=settings.rag.langchain_docs_collection,
-                top_k=settings.rag.top_k,
-            )
+        result = search_langchain_docs(
+            query=query,
+            persist_dir=_knowledge_persist_dir(workspace_root),
+            collection_name=settings.rag.langchain_docs_collection,
+            top_k=settings.rag.top_k,
+        )
     except Exception as exc:
         raise ToolExecutionError(f"knowledge search failed: {exc}") from exc
 
