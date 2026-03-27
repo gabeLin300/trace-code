@@ -29,3 +29,6 @@ class LLMProvider:
 
     def generate(self, prompt: str, model: str) -> LLMResponse:  # pragma: no cover - interface
         raise NotImplementedError
+
+    def stream_generate(self, prompt: str, model: str):  # pragma: no cover - interface
+        raise NotImplementedError

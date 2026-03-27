@@ -64,3 +64,32 @@ class LLMManager:
                 f"default={default_route.provider}:{default_route.model} -> {default_msg}; "
                 f"fallback={fallback_route.provider}:{fallback_route.model} -> {fallback_err}"
             ) from fallback_err
+
+    def generate_stream(self, prompt: str, provider_override: str | None = None):
+        if provider_override:
+            route = parse_provider_route(provider_override)
+            provider = self._resolve(route.provider)
+            yield from provider.stream_generate(prompt, route.model)
+            return
+
+        default_route = parse_provider_route(self.settings.llm.default)
+        fallback_route = parse_provider_route(self.settings.llm.fallback)
+
+        default_err: ProviderError | None = None
+        try:
+            provider = self._resolve(default_route.provider)
+            yield from provider.stream_generate(prompt, default_route.model)
+            return
+        except ProviderError as exc:
+            default_err = exc
+
+        try:
+            fallback_provider = self._resolve(fallback_route.provider)
+            yield from fallback_provider.stream_generate(prompt, fallback_route.model)
+        except ProviderError as fallback_err:
+            default_msg = str(default_err) if default_err is not None else "unknown"
+            raise ProviderError(
+                "both default and fallback providers failed: "
+                f"default={default_route.provider}:{default_route.model} -> {default_msg}; "
+                f"fallback={fallback_route.provider}:{fallback_route.model} -> {fallback_err}"
+            ) from fallback_err

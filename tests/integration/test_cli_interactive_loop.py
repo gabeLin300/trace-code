@@ -112,3 +112,27 @@ def test_interactive_loop_prompts_to_resume_or_create_when_session_exists(tmp_pa
 
     assert any("Existing sessions found" in out for out in outputs)
     assert any("session_id=fresh-session" in out for out in outputs)
+
+
+def test_interactive_loop_keeps_first_command_when_session_choice_skipped(tmp_path) -> None:
+    settings = TraceSettings(workspace_root=tmp_path)
+    run_interactive_session(
+        settings=settings,
+        input_fn=_make_input(["/exit"]),
+        output_fn=lambda _text: None,
+        no_banner=True,
+        session_id="existing2",
+    )
+
+    outputs = []
+    run_interactive_session(
+        settings=settings,
+        input_fn=_make_input(["list files", "/exit"]),
+        output_fn=outputs.append,
+        no_banner=True,
+        session_id="existing2",
+    )
+
+    joined = "\n".join(outputs)
+    assert "Using current session and continuing with your command." in joined
+    assert "[tool:1] status=planned" in joined

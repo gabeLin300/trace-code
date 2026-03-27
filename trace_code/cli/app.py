@@ -13,7 +13,9 @@ from trace_code.llm.base import ProviderError, ProviderSelectionError
 from trace_code.llm.manager import LLMManager
 from trace_code.llm.manager import parse_provider_route
 from trace_code.mcp.manager import MCPManager
+from trace_code.rag.augment import build_augmented_prompt
 from trace_code.sessions.store import SessionRecord, SessionStore
+from trace_code.tools.executor import prompt_requests_tool
 from trace_code.tools.executor import supported_tool_specs
 from trace_code.utils.timeout import call_with_timeout
 from trace_code.workspace.bootstrap import bootstrap_workspace
@@ -112,19 +114,20 @@ def _available_session_ids(ctx: CLIContext) -> list[str]:
     return [p.stem for p in session_files]
 
 
-def _prompt_session_selection(ctx: CLIContext, input_fn: Callable[[], str], output_fn: Callable[[str], None]) -> None:
+def _prompt_session_selection(ctx: CLIContext, input_fn: Callable[[], str], output_fn: Callable[[str], None]) -> str | None:
     session_ids = _available_session_ids(ctx)
     if not session_ids or (len(session_ids) == 1 and session_ids[0] == ctx.session.session_id and not ctx.resumed):
-        return
+        return None
 
     output_fn(
         "Existing sessions found. "
         f"Current session is '{ctx.session.session_id}'. Type 'r' to resume or 'n' to create new."
     )
     while True:
-        choice = input_fn().strip().lower()
+        raw = input_fn().strip()
+        choice = raw.lower()
         if choice in {"r", "resume"}:
-            return
+            return None
         if choice in {"n", "new"}:
             output_fn("Enter new session id:")
             new_id = input_fn().strip()
@@ -139,7 +142,11 @@ def _prompt_session_selection(ctx: CLIContext, input_fn: Callable[[], str], outp
                 ctx.session = SessionRecord(session_id=new_id)
                 ctx.store.save(ctx.session)
                 ctx.resumed = False
-            return
+            return None
+        # UX: if the user immediately types a normal command, keep default resume and process it.
+        if raw and not raw.startswith(("/help", "/config", "/sessions", "/health", "/tools", "/exit")):
+            output_fn("Using current session and continuing with your command.")
+            return raw
         output_fn("Please enter 'r' or 'n'.")
 
 
@@ -267,11 +274,15 @@ def run_interactive_session(
     if ctx.banner:
         output_fn(ctx.banner)
     output_fn(_startup_header_text(ctx.settings))
-    _prompt_session_selection(ctx, input_fn, output_fn)
+    pending_user_input = _prompt_session_selection(ctx, input_fn, output_fn)
 
     try:
         while True:
-            user_input = input_fn().strip()
+            if pending_user_input is not None:
+                user_input = pending_user_input.strip()
+                pending_user_input = None
+            else:
+                user_input = input_fn().strip()
             if not user_input:
                 continue
             _debug(output_fn, f"command received: {user_input}")
@@ -294,6 +305,14 @@ def run_interactive_session(
                 ctx.store.save(ctx.session)
                 if should_exit:
                     break
+                continue
+
+            # True provider streaming path for non-tool prompts.
+            if ctx.settings.ui.stream_responses and not prompt_requests_tool(user_input):
+                stream_result = _stream_direct_llm_response(ctx, user_input, output_fn)
+                ctx.session.chat_history.append({"role": "user", "content": user_input})
+                ctx.session.chat_history.append({"role": "assistant", "content": stream_result})
+                ctx.store.save(ctx.session)
                 continue
 
             _debug(output_fn, "agent loop start")
@@ -322,12 +341,13 @@ def run_interactive_session(
                 status = str(tool_step.get("status", "unknown"))
                 elapsed_ms = int(tool_step.get("elapsed_ms", 0) or 0)
                 summary = _summarize_tool_output(str(tool_step.get("output", "")))
+                output_fn(f"[tool:{tool_step.get('step')}] status=planned tool={tool_name} server={server}")
+                output_fn(f"[tool:{tool_step.get('step')}] status=running tool={tool_name} args={args}")
                 output_fn(
-                    f"[loop step {tool_step.get('step')}] tool={tool_name} "
-                    f"server={server} status={status} elapsed_ms={elapsed_ms} "
-                    f"args={args} confirmation_required={required}"
+                    f"[tool:{tool_step.get('step')}] status=finished tool={tool_name} "
+                    f"result_status={status} elapsed_ms={elapsed_ms} confirmation_required={required}"
                 )
-                output_fn(f"[loop step {tool_step.get('step')}] result_or_blocked={summary}")
+                output_fn(f"[tool:{tool_step.get('step')}] result_or_blocked={summary}")
             if stop_reason:
                 output_fn(f"[loop] stop_reason={stop_reason}")
 
@@ -416,3 +436,60 @@ def _stream_chunks(text: str, chunk_size: int = 220) -> list[str]:
     if current:
         chunks.append(current)
     return chunks
+
+
+def _stream_direct_llm_response(ctx: CLIContext, user_input: str, output_fn: Callable[[str], None]) -> str:
+    manager = LLMManager(ctx.settings)
+    prompt = build_augmented_prompt(
+        user_input,
+        settings=ctx.settings,
+        workspace_root=Path(ctx.settings.workspace_root),
+        mcp_manager=ctx.mcp_manager,
+    )
+    route = parse_provider_route(ctx.settings.llm.default)
+    output_fn(f"[stream] provider={route.provider} model={route.model}")
+    chunks: list[str] = []
+    pending = ""
+    try:
+        for chunk in manager.generate_stream(prompt=prompt):
+            if not chunk:
+                continue
+            chunks.append(chunk)
+            pending += chunk
+            ready_chunks, pending = _drain_stream_buffer(pending, max_chunk_chars=180)
+            for ready in ready_chunks:
+                output_fn(ready)
+    except (ProviderError, ProviderSelectionError) as exc:
+        msg = f"LLM error: {exc}"
+        output_fn(msg)
+        return msg
+    if pending.strip():
+        output_fn(pending.strip())
+    text = "".join(chunks).strip()
+    return text or "(empty response)"
+
+
+def _drain_stream_buffer(buffer: str, *, max_chunk_chars: int) -> tuple[list[str], str]:
+    """Return printable chunks from token deltas without 1-token-per-line noise."""
+    out: list[str] = []
+    pending = buffer
+
+    while True:
+        newline_idx = pending.find("\n")
+        if newline_idx == -1:
+            break
+        ready = pending[:newline_idx].strip()
+        pending = pending[newline_idx + 1 :]
+        if ready:
+            out.append(ready)
+
+    while len(pending) >= max_chunk_chars:
+        cut = pending.rfind(" ", 0, max_chunk_chars)
+        if cut < 40:
+            cut = max_chunk_chars
+        ready = pending[:cut].strip()
+        pending = pending[cut:].lstrip()
+        if ready:
+            out.append(ready)
+
+    return out, pending
