@@ -129,4 +129,4 @@ Optional: remove generated assistant data from any workspace where you ran `trac
 rm -rf /path/to/workspace/.assistant
 ```
 ## LucidChart Flow Diagram
-- https://lucid.app/lucidchart/45312233-6c52-4ff2-9d3d-13bd0d5d9b68/edit?viewport_loc=468%2C209%2C2796%2C1267%2C0_0&invitationId=inv_47aad19a-b165-4232-8ff4-b5352fa0a906
+[Link to Diagram](https://lucid.app/lucidchart/45312233-6c52-4ff2-9d3d-13bd0d5d9b68/edit?viewport_loc=468%2C209%2C2796%2C1267%2C0_0&invitationId=inv_47aad19a-b165-4232-8ff4-b5352fa0a906)
