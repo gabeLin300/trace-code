@@ -37,11 +37,12 @@ class PreflightReport:
         return "\n".join(lines)
 
 
-def run_preflight(settings: TraceSettings) -> PreflightReport:
+def run_preflight(settings: TraceSettings, include_mcp_launchability: bool = True) -> PreflightReport:
     checks: list[PreflightCheck] = []
     checks.append(_check_npx_available(settings))
     checks.extend(_check_required_keys(settings))
-    checks.extend(_check_mcp_launchability(settings))
+    if include_mcp_launchability:
+        checks.extend(_check_mcp_launchability(settings))
     return PreflightReport(checks=checks)
 
 

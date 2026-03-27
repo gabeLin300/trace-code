@@ -25,6 +25,7 @@ class MCPSettings:
     startup_timeout_s: float = 8.0
     tools_timeout_s: float = 3.0
     operation_timeout_s: float = 20.0
+    ingest_timeout_s: float = 300.0
 
     def filesystem_server_argv(self) -> list[str]:
         argv = shlex.split(self.filesystem_server_command)
@@ -78,6 +79,7 @@ class WebSearchSettings:
     api_key_env_var: str = "TAVILY_API_KEY"
     default_max_results: int = 5
     default_search_depth: str = "basic"
+    web_context_max_chars: int = 2000
 
 
 @dataclass
@@ -90,6 +92,7 @@ class TraceSettings:
     retry: RetrySettings = field(default_factory=RetrySettings)
     rag: RagSettings = field(default_factory=RagSettings)
     web_search: WebSearchSettings = field(default_factory=WebSearchSettings)
+    fast_path_enabled: bool = True
 
 
 def _resolve_python_argv(argv: list[str]) -> list[str]:

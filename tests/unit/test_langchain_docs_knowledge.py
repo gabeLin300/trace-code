@@ -206,7 +206,7 @@ def test_search_reuses_existing_vector_store_without_reingest(monkeypatch, tmp_p
         return chunks
 
     monkeypatch.setattr(kb, "crawl_langchain_docs", _crawl)
-    monkeypatch.setattr(kb, "semantic_split_documents", _split)
+    monkeypatch.setattr(kb, "_simple_split_documents", _split)
 
     class FakeCollection:
         def __init__(self):

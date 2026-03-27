@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 from pathlib import Path
 
 from trace_code.knowledge.langchain_docs import index_langchain_docs, search_langchain_docs
@@ -15,7 +16,7 @@ def _default_vector_dir(workspace_root: Path) -> Path:
 
 def _build_server(workspace_root: Path):
     try:
-        from fastmcp import FastMCP
+        FastMCP = importlib.import_module("fastmcp").FastMCP
     except Exception as exc:
         raise RuntimeError("fastmcp is required to run the local knowledge MCP server") from exc
 

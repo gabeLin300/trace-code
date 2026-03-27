@@ -86,6 +86,7 @@ def prompt_requests_tool(user_input: str) -> bool:
     return (
         "list files" in lowered
         or lowered.startswith("read file ")
+        or lowered.startswith("read ")
         or lowered.startswith("write file ")
         or lowered.startswith("edit file ")
         or lowered.startswith("search code for ")
@@ -256,6 +257,12 @@ def execute_tool_from_prompt(
             raise ToolExecutionError("missing file path for read file")
         return _read_file(workspace_root, path_text, settings, mcp_manager)
 
+    if lowered.startswith("read "):
+        path_text = text[len("read ") :].strip()
+        if not path_text or path_text in {"file", "files"}:
+            raise ToolExecutionError("missing file path for read")
+        return _read_file(workspace_root, path_text, settings, mcp_manager)
+
     if lowered.startswith("write file "):
         rest = text[len("write file ") :].strip()
         path_text, sep, content = rest.partition(" with content ")
@@ -355,19 +362,13 @@ def _ingest_langchain_docs(
         max_pages = max(1, int(match.group(1)))
 
     try:
-        if mcp_manager is not None:
-            result = mcp_manager.ingest_langchain_docs(
-                seed_url=settings.rag.langchain_docs_seed_url,
-                max_pages=max_pages,
-                collection=settings.rag.langchain_docs_collection,
-            )
-        else:
-            result = index_langchain_docs(
-                seed_url=settings.rag.langchain_docs_seed_url,
-                persist_dir=_knowledge_persist_dir(workspace_root),
-                collection_name=settings.rag.langchain_docs_collection,
-                max_pages=max_pages,
-            )
+        # Always call in-process — avoids MCP subprocess startup + IPC overhead.
+        result = index_langchain_docs(
+            seed_url=settings.rag.langchain_docs_seed_url,
+            persist_dir=_knowledge_persist_dir(workspace_root),
+            collection_name=settings.rag.langchain_docs_collection,
+            max_pages=max_pages,
+        )
     except Exception as exc:
         raise ToolExecutionError(f"knowledge ingest failed: {exc}") from exc
 

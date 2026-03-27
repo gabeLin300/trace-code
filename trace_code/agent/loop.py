@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 from pathlib import Path
+import re
 import time
 from typing import Callable
 
@@ -17,7 +18,11 @@ from trace_code.tools.executor import (
     prompt_requests_tool,
     supported_tool_specs,
 )
+from trace_code.utils.perf import PerfTrace, perf_session
 from trace_code.utils.timeout import call_with_timeout
+
+_DECISION_CACHE: dict[int, dict] = {}
+_DECISION_CACHE_MAX = 32
 
 
 def run_agentic_task(
@@ -35,159 +40,227 @@ def run_agentic_task(
 
     steps: list[dict] = []
     tools: list[dict] = []
+    perf: list[dict] = []
     action_history: list[str] = []
     output_signatures: list[str] = []
     latest_tool_name = ""
     latest_tool_output = ""
+    available_tools_text = _available_tools_for_prompt(mcp_manager)
 
-    for step_idx in range(1, max_steps + 1):
-        _emit_debug(debug_fn, f"loop step {step_idx} start")
-        _emit_debug(debug_fn, f"loop step {step_idx} planning start")
-        decision = _plan_next_action(
-            manager=manager,
-            user_input=user_input,
-            latest_tool_name=latest_tool_name,
-            latest_tool_output=latest_tool_output,
-            settings=settings,
-            provider_override=provider_override,
-            mcp_manager=mcp_manager,
-            is_first_step=(step_idx == 1),
-            debug_fn=debug_fn,
-        )
-        _emit_debug(debug_fn, f"loop step {step_idx} planning end action={decision.get('action')}")
-        steps.append({"step": step_idx, "kind": "decision", **decision})
-        if decision["action"] == "final":
-            final_eval = _evaluate_final_completion(
-                user_input=user_input,
-                response=str(decision.get("payload", "")),
-                used_tools=bool(tools),
-            )
-            steps.append({"step": step_idx, "kind": "evaluation", "phase": "final", **final_eval})
-            if (
-                not final_eval["is_complete"]
-                and step_idx < max_steps
-                and prompt_requests_tool(user_input)
-            ):
-                # Keep autonomy: when final response looks incomplete for a tool-oriented goal,
-                # force one tool-attempt from the original request before giving up.
-                decision = {"action": "tool", "payload": user_input, "tool_name": "", "arguments": {}}
-                steps.append(
-                    {
+    with perf_session(perf):
+        for step_idx in range(1, max_steps + 1):
+            _emit_debug(debug_fn, f"loop step {step_idx} start")
+            # Phase 2b: fast-path — skip LLM planner for tool-obvious commands on step 1.
+            if step_idx == 1 and settings.fast_path_enabled and prompt_requests_tool(user_input):
+                with PerfTrace("tool_fast_path", step=step_idx):
+                    try:
+                        _fp = execute_tool_from_prompt(
+                            user_input=user_input,
+                            workspace_root=Path(settings.workspace_root),
+                            settings=settings,
+                            mcp_manager=mcp_manager,
+                        )
+                    except Exception:
+                        _fp = None
+                if _fp and _fp.get("status") == "ok" and not _fp.get("confirmation_required"):
+                    tools.append({
                         "step": step_idx,
-                        "kind": "decision_override",
-                        "reason": "final_response_incomplete_for_tool_goal",
-                        "action": "tool",
-                        "payload": user_input,
-                    }
+                        "tool_name": _fp["tool_name"],
+                        "status": "tool_called",
+                        "output": _fp["output"],
+                        "arguments": _fp.get("arguments", {}),
+                        "confirmation_required": False,
+                        "elapsed_ms": 0,
+                    })
+                    steps.append({"step": step_idx, "kind": "tool_fast_path", **_fp})
+                    return _finalize_result(
+                        status="answered_with_tools",
+                        response=_fp["output"],
+                        steps=steps,
+                        tools=tools,
+                        stop_reason="fast_path",
+                        completion={
+                            "is_complete": True,
+                            "confidence": "high",
+                            "unmet_requirements": [],
+                            "reason": "fast_path_tool_resolved",
+                        },
+                        perf=perf,
+                    )
+            _emit_debug(debug_fn, f"loop step {step_idx} planning start")
+            with PerfTrace("decision", step=step_idx):
+                decision = _plan_next_action(
+                    manager=manager,
+                    user_input=user_input,
+                    latest_tool_name=latest_tool_name,
+                    latest_tool_output=latest_tool_output,
+                    available_tools=available_tools_text,
+                    settings=settings,
+                    provider_override=provider_override,
+                    mcp_manager=mcp_manager,
+                    is_first_step=(step_idx == 1),
+                    debug_fn=debug_fn,
                 )
-            else:
-                _emit_debug(debug_fn, f"loop step {step_idx} finalize done")
+            _emit_debug(debug_fn, f"loop step {step_idx} planning end action={decision.get('action')}")
+            steps.append({"step": step_idx, "kind": "decision", **decision})
+            if decision["action"] == "final":
+                with PerfTrace("eval", step=step_idx, phase="final"):
+                    final_eval = _evaluate_final_completion(
+                        user_input=user_input,
+                        response=str(decision.get("payload", "")),
+                        used_tools=bool(tools),
+                    )
+                steps.append({"step": step_idx, "kind": "evaluation", "phase": "final", **final_eval})
+                if (
+                    not final_eval["is_complete"]
+                    and step_idx < max_steps
+                    and prompt_requests_tool(user_input)
+                ):
+                    # Keep autonomy: when final response looks incomplete for a tool-oriented goal,
+                    # force one tool-attempt from the original request before giving up.
+                    decision = {"action": "tool", "payload": user_input, "tool_name": "", "arguments": {}}
+                    steps.append(
+                        {
+                            "step": step_idx,
+                            "kind": "decision_override",
+                            "reason": "final_response_incomplete_for_tool_goal",
+                            "action": "tool",
+                            "payload": user_input,
+                        }
+                    )
+                else:
+                    _emit_debug(debug_fn, f"loop step {step_idx} finalize done")
+                    return _finalize_result(
+                        status="answered" if not tools else "answered_with_tools",
+                        response=decision["payload"],
+                        steps=steps,
+                        tools=tools,
+                        stop_reason="done",
+                        completion=final_eval,
+                        perf=perf,
+                    )
+
+            command = decision.get("payload", "")
+            tool_name = decision.get("tool_name", "")
+            arguments = decision.get("arguments", {})
+            next_action_key = f"{tool_name}:{json.dumps(arguments, sort_keys=True)}" if tool_name else str(command)
+            with PerfTrace("eval", step=step_idx, phase="guardrail"):
+                guard = _evaluate_progress_guardrails(
+                    next_action_key=next_action_key,
+                    action_history=action_history,
+                    output_signatures=output_signatures,
+                )
+            if guard is not None:
+                steps.append({"step": step_idx, "kind": "guardrail", **guard})
+                _emit_debug(debug_fn, f"loop step {step_idx} guardrail stop={guard['stop_reason']}")
                 return _finalize_result(
-                    status="answered" if not tools else "answered_with_tools",
-                    response=decision["payload"],
+                    status=guard["status"],
+                    response=guard["response"],
                     steps=steps,
                     tools=tools,
-                    stop_reason="done",
-                    completion=final_eval,
-                )
-
-        command = decision.get("payload", "")
-        tool_name = decision.get("tool_name", "")
-        arguments = decision.get("arguments", {})
-        next_action_key = f"{tool_name}:{json.dumps(arguments, sort_keys=True)}" if tool_name else str(command)
-        guard = _evaluate_progress_guardrails(
-            next_action_key=next_action_key,
-            action_history=action_history,
-            output_signatures=output_signatures,
-        )
-        if guard is not None:
-            steps.append({"step": step_idx, "kind": "guardrail", **guard})
-            _emit_debug(debug_fn, f"loop step {step_idx} guardrail stop={guard['stop_reason']}")
-            return _finalize_result(
-                status=guard["status"],
-                response=guard["response"],
-                steps=steps,
-                tools=tools,
-                stop_reason=guard["stop_reason"],
-                completion={
-                    "is_complete": False,
-                    "confidence": "low",
-                    "unmet_requirements": ["loop_guardrail_triggered"],
-                    "reason": guard["stop_reason"],
-                },
-            )
-
-        action_history.append(next_action_key)
-        _emit_debug(debug_fn, f"loop step {step_idx} execute start tool={tool_name or command}")
-        tool_result = _execute_action(
-            command=command,
-            tool_name=tool_name,
-            arguments=arguments,
-            settings=settings,
-            mcp_manager=mcp_manager,
-            debug_fn=debug_fn,
-        )
-        _emit_debug(debug_fn, f"loop step {step_idx} execute end status={tool_result.get('status')}")
-        steps.append({"step": step_idx, "kind": "tool", **tool_result})
-
-        if tool_result.get("tool"):
-            tools.append(
-                {
-                    "step": step_idx,
-                    "tool_name": tool_result.get("tool", "unknown"),
-                    "status": tool_result.get("status", "unknown"),
-                    "output": tool_result.get("response", ""),
-                    "arguments": tool_result.get("arguments", {}),
-                    "confirmation_required": tool_result.get("confirmation_required", False),
-                    "elapsed_ms": tool_result.get("elapsed_ms", 0),
-                }
-            )
-            tool_eval = _evaluate_tool_progress(
-                user_input=user_input,
-                tool_name=str(tool_result.get("tool", "")),
-                tool_output=str(tool_result.get("response", "")),
-            )
-            steps.append({"step": step_idx, "kind": "evaluation", "phase": "tool", **tool_eval})
-
-        if tool_result.get("status") in {"error", "blocked", "requires_confirmation"}:
-            _emit_debug(debug_fn, f"loop step {step_idx} stop_reason={tool_result.get('status')}")
-            if tool_result.get("status") == "error" and latest_tool_output:
-                partial = (
-                    f"{latest_tool_output}\n\n"
-                    f"Note: a follow-up tool call failed, so I returned the best available result. "
-                    f"{tool_result.get('response', '')}"
-                )
-                return _finalize_result(
-                    status="answered_with_tools",
-                    response=partial,
-                    steps=steps,
-                    tools=tools,
-                    stop_reason="partial_error",
+                    stop_reason=guard["stop_reason"],
                     completion={
                         "is_complete": False,
-                        "confidence": "medium",
-                        "unmet_requirements": ["follow_up_tool_failed"],
-                        "reason": "partial_error",
+                        "confidence": "low",
+                        "unmet_requirements": ["loop_guardrail_triggered"],
+                        "reason": guard["stop_reason"],
                     },
+                    perf=perf,
                 )
-            return _finalize_result(
-                status=str(tool_result.get("status", "error")),
-                response=str(tool_result.get("response", "")),
-                steps=steps,
-                tools=tools,
-                stop_reason="blocked" if tool_result.get("status") in {"blocked", "requires_confirmation"} else "error",
-                completion={
-                    "is_complete": False,
-                    "confidence": "low",
-                    "unmet_requirements": ["tool_execution_failed_or_blocked"],
-                    "reason": str(tool_result.get("status", "error")),
-                },
-            )
 
-        latest_tool_name = str(tool_result.get("tool", ""))
-        latest_tool_output = str(tool_result.get("response", ""))
-        output_signatures.append(_output_signature(latest_tool_name, latest_tool_output))
-        _emit_debug(debug_fn, f"loop step {step_idx} end")
+            action_history.append(next_action_key)
+            _emit_debug(debug_fn, f"loop step {step_idx} execute start tool={tool_name or command}")
+            with PerfTrace("tool_exec", step=step_idx, tool=tool_name or "prompt"):
+                tool_result = _execute_action(
+                    command=command,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    settings=settings,
+                    mcp_manager=mcp_manager,
+                    debug_fn=debug_fn,
+                )
+            _emit_debug(debug_fn, f"loop step {step_idx} execute end status={tool_result.get('status')}")
+            steps.append({"step": step_idx, "kind": "tool", **tool_result})
+
+            if tool_result.get("tool"):
+                tools.append(
+                    {
+                        "step": step_idx,
+                        "tool_name": tool_result.get("tool", "unknown"),
+                        "status": tool_result.get("status", "unknown"),
+                        "output": tool_result.get("response", ""),
+                        "arguments": tool_result.get("arguments", {}),
+                        "confirmation_required": tool_result.get("confirmation_required", False),
+                        "elapsed_ms": tool_result.get("elapsed_ms", 0),
+                    }
+                )
+                with PerfTrace("eval", step=step_idx, phase="tool"):
+                    tool_eval = _evaluate_tool_progress(
+                        user_input=user_input,
+                        tool_name=str(tool_result.get("tool", "")),
+                        tool_output=str(tool_result.get("response", "")),
+                    )
+                steps.append({"step": step_idx, "kind": "evaluation", "phase": "tool", **tool_eval})
+
+                # For explicit single-shot filesystem commands, return immediately with
+                # tool output instead of incurring an additional planner/LLM round-trip.
+                if step_idx == 1 and _is_single_shot_fs_command(user_input):
+                    return _finalize_result(
+                        status="answered_with_tools",
+                        response=str(tool_result.get("response", "")),
+                        steps=steps,
+                        tools=tools,
+                        stop_reason="single_tool_done",
+                        completion={
+                            "is_complete": True,
+                            "confidence": "high",
+                            "unmet_requirements": [],
+                            "reason": "single_tool_command",
+                        },
+                        perf=perf,
+                    )
+
+            if tool_result.get("status") in {"error", "blocked", "requires_confirmation"}:
+                _emit_debug(debug_fn, f"loop step {step_idx} stop_reason={tool_result.get('status')}")
+                if tool_result.get("status") == "error" and latest_tool_output:
+                    partial = (
+                        f"{latest_tool_output}\n\n"
+                        f"Note: a follow-up tool call failed, so I returned the best available result. "
+                        f"{tool_result.get('response', '')}"
+                    )
+                    return _finalize_result(
+                        status="answered_with_tools",
+                        response=partial,
+                        steps=steps,
+                        tools=tools,
+                        stop_reason="partial_error",
+                        completion={
+                            "is_complete": False,
+                            "confidence": "medium",
+                            "unmet_requirements": ["follow_up_tool_failed"],
+                            "reason": "partial_error",
+                        },
+                        perf=perf,
+                    )
+                return _finalize_result(
+                    status=str(tool_result.get("status", "error")),
+                    response=str(tool_result.get("response", "")),
+                    steps=steps,
+                    tools=tools,
+                    stop_reason="blocked" if tool_result.get("status") in {"blocked", "requires_confirmation"} else "error",
+                    completion={
+                        "is_complete": False,
+                        "confidence": "low",
+                        "unmet_requirements": ["tool_execution_failed_or_blocked"],
+                        "reason": str(tool_result.get("status", "error")),
+                    },
+                    perf=perf,
+                )
+
+            latest_tool_name = str(tool_result.get("tool", ""))
+            latest_tool_output = str(tool_result.get("response", ""))
+            output_signatures.append(_output_signature(latest_tool_name, latest_tool_output))
+            _emit_debug(debug_fn, f"loop step {step_idx} end")
 
     _emit_debug(debug_fn, "loop stop_reason=step_limit")
     return _finalize_result(
@@ -202,6 +275,7 @@ def run_agentic_task(
             "unmet_requirements": ["step_limit_reached"],
             "reason": "step_limit",
         },
+        perf=perf,
     )
 
 
@@ -268,6 +342,7 @@ def _execute_action(
 ) -> dict:
     try:
         started = time.monotonic()
+        action_timeout_s = _action_timeout_s(command=command, tool_name=tool_name, arguments=arguments, settings=settings)
         if tool_name:
             _assert_tool_executable(tool_name=tool_name, mcp_manager=mcp_manager)
             ok, value, err = call_with_timeout(
@@ -278,7 +353,7 @@ def _execute_action(
                     settings=settings,
                     mcp_manager=mcp_manager,
                 ),
-                timeout_s=30.0,
+                timeout_s=action_timeout_s,
             )
             if not ok:
                 raise ToolExecutionError(f"tool execution timeout/error: {err}")
@@ -291,7 +366,7 @@ def _execute_action(
                     settings=settings,
                     mcp_manager=mcp_manager,
                 ),
-                timeout_s=30.0,
+                timeout_s=action_timeout_s,
             )
             if not ok:
                 raise ToolExecutionError(f"tool execution timeout/error: {err}")
@@ -316,6 +391,7 @@ def _plan_next_action(
     user_input: str,
     latest_tool_name: str,
     latest_tool_output: str,
+    available_tools: str,
     settings: TraceSettings,
     provider_override: str | None,
     mcp_manager: MCPManager | None,
@@ -323,7 +399,6 @@ def _plan_next_action(
     debug_fn: Callable[[str], None] | None = None,
 ) -> dict[str, str]:
     stage = "first" if is_first_step else "next"
-    available_tools = _available_tools_for_prompt(mcp_manager)
     decision_prompt = _decision_prompt(
         user_input=user_input,
         latest_tool_name=latest_tool_name,
@@ -331,12 +406,13 @@ def _plan_next_action(
         stage=stage,
         available_tools=available_tools,
     )
-    prompt = build_augmented_prompt(
-        decision_prompt,
-        settings=settings,
-        workspace_root=Path(settings.workspace_root),
-        mcp_manager=mcp_manager,
-    )
+    _cache_key = hash((user_input, latest_tool_name, latest_tool_output, stage))
+    _cached = _DECISION_CACHE.get(_cache_key)
+    if _cached is not None:
+        return dict(_cached)
+    # Planner prompt should stay lightweight; retrieval context adds avoidable latency
+    # and is more useful for user-facing final answers than action selection.
+    prompt = decision_prompt
     try:
         _emit_debug(debug_fn, "provider/model invocation start")
         ok, response, err = call_with_timeout(
@@ -373,7 +449,10 @@ def _plan_next_action(
 
     decision = _parse_decision_response(text=text, fallback=latest_tool_output or text)
     if is_first_step and prompt_requests_tool(user_input) and decision["action"] == "final":
-        return {"action": "tool", "payload": user_input, "tool_name": "", "arguments": {}}
+        decision = {"action": "tool", "payload": user_input, "tool_name": "", "arguments": {}}
+    if len(_DECISION_CACHE) >= _DECISION_CACHE_MAX:
+        _DECISION_CACHE.pop(next(iter(_DECISION_CACHE)))
+    _DECISION_CACHE[_cache_key] = decision
     return decision
 
 
@@ -472,6 +551,7 @@ def _finalize_result(
     tools: list[dict],
     stop_reason: str,
     completion: dict | None = None,
+    perf: list[dict] | None = None,
 ) -> dict:
     if completion is None:
         completion = _default_completion(status=status, response=response)
@@ -484,22 +564,16 @@ def _finalize_result(
         "tool_status": tools[-1]["status"] if tools else None,
         "stop_reason": stop_reason,
         "completion": completion,
+        "perf": perf or [],
     }
 
 
 def _available_tools_for_prompt(mcp_manager: MCPManager | None) -> str:
-    dynamic = {}
-    if mcp_manager is not None:
-        try:
-            dynamic = mcp_manager.available_tools()
-        except Exception:
-            dynamic = {}
-
     rows: list[str] = []
     for spec in supported_tool_specs():
         rows.append(f"- {spec['name']}: {spec['description']} args={json.dumps(spec['arguments'], ensure_ascii=True)}")
-    if dynamic:
-        rows.append(f"- dynamic_mcp_tools={json.dumps(dynamic, ensure_ascii=True)}")
+    # Avoid runtime MCP tool discovery here; probing servers can introduce multi-second
+    # startup/list-tools delays and doesn't materially help for built-in command routing.
     return "\n".join(rows)
 
 
@@ -607,3 +681,37 @@ def _default_completion(*, status: str, response: str) -> dict[str, object]:
         "unmet_requirements": ["non_answer_terminal_state"],
         "reason": "default_finalization",
     }
+
+
+def _is_single_shot_fs_command(user_input: str) -> bool:
+    lowered = user_input.strip().lower()
+    if lowered == "list files":
+        return True
+    if lowered.startswith("read file "):
+        return len(lowered) > len("read file ")
+    if lowered.startswith("read "):
+        return len(lowered) > len("read ")
+    return False
+
+
+def _action_timeout_s(*, command: str, tool_name: str, arguments: dict, settings: TraceSettings) -> float:
+    normalized_tool = normalize_tool_name(tool_name) if tool_name else ""
+    lowered = command.strip().lower()
+    is_ingest = normalized_tool == "knowledge.ingest_langchain_docs" or "ingest langchain docs" in lowered
+    if is_ingest:
+        pages_hint = _ingest_max_pages_hint(command=command, arguments=arguments)
+        ingest_timeout_s = max(float(settings.mcp.ingest_timeout_s), min(900.0, float(pages_hint) * 30.0))
+        return ingest_timeout_s + 30.0
+    return 30.0
+
+
+def _ingest_max_pages_hint(*, command: str, arguments: dict) -> int:
+    try:
+        if "max_pages" in arguments:
+            return max(1, int(arguments.get("max_pages", 25)))
+    except Exception:
+        pass
+    match = re.search(r"max\s+pages\s+(\d+)", command.lower())
+    if match is not None:
+        return max(1, int(match.group(1)))
+    return 25

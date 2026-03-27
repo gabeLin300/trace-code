@@ -1,4 +1,5 @@
 from trace_code.agent import loop
+from trace_code.config import TraceSettings
 from trace_code.llm.base import LLMResponse
 
 
@@ -43,7 +44,7 @@ def test_run_agentic_task_executes_tool_then_finalizes(monkeypatch) -> None:
         ),
     )
 
-    result = loop.run_agentic_task("List files and summarize.")
+    result = loop.run_agentic_task("List files and summarize.", settings=TraceSettings(fast_path_enabled=False))
 
     assert result["status"] == "answered_with_tools"
     assert result["tools"][0]["tool_name"] == "fs.list"
@@ -162,7 +163,34 @@ def test_run_agentic_task_stops_on_repeated_tool_guardrail(monkeypatch) -> None:
         ),
     )
 
-    result = loop.run_agentic_task("list files repeatedly", max_steps=4)
+    result = loop.run_agentic_task("list files repeatedly", max_steps=4, settings=TraceSettings(fast_path_enabled=False))
 
     assert result["status"] == "no_progress"
     assert result["stop_reason"] in {"repeated_tool", "no_progress"}
+
+
+def test_run_agentic_task_single_read_command_short_circuits(monkeypatch) -> None:
+    monkeypatch.setattr(loop, "prompt_requests_tool", lambda _text: True)
+    monkeypatch.setattr(
+        loop,
+        "execute_tool_from_prompt",
+        lambda **kwargs: {
+            "tool_name": "fs.read",
+            "status": "ok",
+            "output": "README content",
+            "arguments": {"path": "README.md"},
+        },
+    )
+
+    # If this is called, short-circuit did not happen.
+    monkeypatch.setattr(
+        loop.LLMManager,
+        "generate",
+        lambda self, prompt, provider_override=None: (_ for _ in ()).throw(AssertionError("LLM should not be called")),
+    )
+
+    result = loop.run_agentic_task("read file README.md", settings=TraceSettings(fast_path_enabled=False))
+
+    assert result["status"] == "answered_with_tools"
+    assert result["response"] == "README content"
+    assert result["stop_reason"] == "single_tool_done"

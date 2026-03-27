@@ -41,7 +41,7 @@ def main() -> int:
         prompt_if_missing=False,
     )
 
-    report = run_preflight(settings)
+    report = run_preflight(settings, include_mcp_launchability=args.preflight)
     _write(report.render())
     if not report.ok:
         return 2

@@ -242,6 +242,48 @@ def semantic_split_documents(docs: list[LangChainDoc]) -> list[dict[str, Any]]:
     return chunks
 
 
+def _simple_split_documents(
+    docs: list[LangChainDoc],
+    *,
+    chunk_chars: int = 1400,
+    overlap_chars: int = 180,
+) -> list[dict[str, Any]]:
+    """Cheap deterministic splitter used when semantic chunking is too costly."""
+    if not docs:
+        return []
+
+    chunks: list[dict[str, Any]] = []
+    for doc in docs:
+        text = doc.text.strip()
+        if not text:
+            continue
+        start = 0
+        local_idx = 0
+        while start < len(text):
+            end = min(len(text), start + chunk_chars)
+            chunk_text = text[start:end].strip()
+            if chunk_text:
+                chunk_id = hashlib.sha1(f"{doc.url}::{local_idx}::{chunk_text}".encode("utf-8")).hexdigest()
+                chunks.append(
+                    {
+                        "id": chunk_id,
+                        "text": chunk_text,
+                        "metadata": {
+                            "source_url": doc.url,
+                            "title": doc.title,
+                            "fetched_at": doc.fetched_at,
+                            "chunk_index": local_idx,
+                            "chunking": "simple",
+                        },
+                    }
+                )
+            if end >= len(text):
+                break
+            start = max(0, end - overlap_chars)
+            local_idx += 1
+    return chunks
+
+
 def _chroma_collection(persist_dir: Path, collection_name: str):
     try:
         import chromadb
@@ -260,7 +302,10 @@ def index_langchain_docs(
     max_pages: int = 25,
 ) -> dict[str, Any]:
     docs = crawl_langchain_docs(seed_url=seed_url, max_pages=max_pages)
-    chunks = semantic_split_documents(docs)
+    # Always use simple splitting — semantic chunking requires downloading an embedding model
+    # on first run which can stall for minutes. Simple splitting is fast and reliable.
+    chunks = _simple_split_documents(docs)
+    chunking_strategy = "simple"
 
     persist_dir.mkdir(parents=True, exist_ok=True)
     collection = _chroma_collection(persist_dir, collection_name)
@@ -277,6 +322,7 @@ def index_langchain_docs(
         "seed_url": seed_url,
         "pages_indexed": len(docs),
         "chunks_indexed": len(chunks),
+        "chunking_strategy": chunking_strategy,
         "collection": collection_name,
         "persist_dir": str(persist_dir),
     }

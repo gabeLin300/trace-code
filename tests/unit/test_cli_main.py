@@ -9,7 +9,7 @@ def test_main_exits_cleanly(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         cli_main,
         "run_preflight",
-        lambda settings: PreflightReport(checks=[PreflightCheck("x", True, "ok", "")]),
+        lambda settings, include_mcp_launchability=True: PreflightReport(checks=[PreflightCheck("x", True, "ok", "")]),
     )
     inputs = iter(["r", "/exit"])
     monkeypatch.setattr("builtins.input", lambda _: next(inputs))
@@ -28,7 +28,7 @@ def test_main_preflight_flag_exits_without_repl(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         cli_main,
         "run_preflight",
-        lambda settings: PreflightReport(checks=[PreflightCheck("x", True, "ok", "")]),
+        lambda settings, include_mcp_launchability=True: PreflightReport(checks=[PreflightCheck("x", True, "ok", "")]),
     )
 
     code = cli_main.main()
@@ -43,7 +43,7 @@ def test_main_exits_nonzero_when_preflight_fails(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         cli_main,
         "run_preflight",
-        lambda settings: PreflightReport(checks=[PreflightCheck("x", False, "broken", "fix it")]),
+        lambda settings, include_mcp_launchability=True: PreflightReport(checks=[PreflightCheck("x", False, "broken", "fix it")]),
     )
 
     code = cli_main.main()
@@ -60,7 +60,7 @@ def test_main_applies_auto_exec_and_no_stream_flags(monkeypatch) -> None:
     monkeypatch.setattr(
         cli_main,
         "run_preflight",
-        lambda settings: PreflightReport(checks=[PreflightCheck("x", True, "ok", "")]),
+        lambda settings, include_mcp_launchability=True: PreflightReport(checks=[PreflightCheck("x", True, "ok", "")]),
     )
 
     captured = {}

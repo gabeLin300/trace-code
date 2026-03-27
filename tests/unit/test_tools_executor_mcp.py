@@ -62,6 +62,20 @@ def test_read_file_prefers_mcp(monkeypatch, tmp_path) -> None:
     assert result["output"] == "file-content"
 
 
+def test_read_shorthand_prefers_mcp(monkeypatch, tmp_path) -> None:
+    (tmp_path / "README.md").write_text("local-data", encoding="utf-8")
+    monkeypatch.setattr(executor, "FilesystemMCPClient", _FakeClient)
+
+    result = executor.execute_tool_from_prompt(
+        "read README.md",
+        workspace_root=tmp_path,
+        settings=TraceSettings(workspace_root=tmp_path),
+    )
+
+    assert result["tool_name"] == "fs.read"
+    assert result["output"] == "file-content"
+
+
 def test_falls_back_to_local_when_mcp_unavailable(monkeypatch, tmp_path) -> None:
     (tmp_path / "fallback.txt").write_text("fallback-data", encoding="utf-8")
     monkeypatch.setattr(executor, "FilesystemMCPClient", _FailingClient)

@@ -6,6 +6,7 @@ from trace_code.config import TraceSettings
 from trace_code.knowledge.langchain_docs import search_langchain_docs
 from trace_code.mcp.manager import MCPManager
 from trace_code.mcp.web_search_server import resolve_tavily_api_key, tavily_search
+from trace_code.utils.perf import PerfTrace
 
 
 def build_augmented_prompt(
@@ -16,17 +17,20 @@ def build_augmented_prompt(
     mcp_manager: MCPManager | None = None,
 ) -> str:
     """Build a model prompt augmented with retrieved context when available."""
-    local_context = _retrieve_local_knowledge_context(
-        query=user_input,
-        settings=settings,
-        workspace_root=workspace_root,
-        mcp_manager=mcp_manager,
-    )
-    web_context = _maybe_retrieve_web_context(
-        query=user_input,
-        settings=settings,
-        mcp_manager=mcp_manager,
-    )
+    if _is_fs_command(user_input):
+        return user_input
+    with PerfTrace("rag_augment"):
+        local_context = _retrieve_local_knowledge_context(
+            query=user_input,
+            settings=settings,
+            workspace_root=workspace_root,
+            mcp_manager=mcp_manager,
+        )
+        web_context = _maybe_retrieve_web_context(
+            query=user_input,
+            settings=settings,
+            mcp_manager=mcp_manager,
+        )
 
     sections: list[str] = []
     if local_context:
@@ -155,7 +159,9 @@ def _maybe_retrieve_web_context(
         content = " ".join(str(item.get("content", "")).split())[:280]
         lines.append(f"{idx}. {title} ({url})\n{content}")
 
-    return "\n\n".join(lines)
+    result_text = "\n\n".join(lines)
+    max_chars = settings.web_search.web_context_max_chars
+    return result_text[:max_chars] if len(result_text) > max_chars else result_text
 
 
 def should_use_web_search(query: str) -> bool:
@@ -175,3 +181,15 @@ def should_use_web_search(query: str) -> bool:
 
 def _knowledge_persist_dir(workspace_root: Path) -> Path:
     return workspace_root / ".assistant" / "vector_db" / "langchain_docs"
+
+
+def _is_fs_command(query: str) -> bool:
+    """Return True when query is a direct filesystem operation that needs no RAG context."""
+    lowered = query.lower()
+    return (
+        "list files" in lowered
+        or lowered.startswith("read file ")
+        or lowered.startswith("write file ")
+        or lowered.startswith("edit file ")
+        or lowered.startswith("search code for ")
+    )

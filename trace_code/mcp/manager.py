@@ -10,6 +10,7 @@ from trace_code.config import TraceSettings
 from trace_code.mcp.filesystem_client import FilesystemMCPClient, MCPClientError
 from trace_code.mcp.local_knowledge_client import LocalKnowledgeMCPClient, LocalKnowledgeMCPClientError
 from trace_code.mcp.web_search_client import WebSearchMCPClient, WebSearchMCPClientError
+from trace_code.utils.perf import PerfTrace
 from trace_code.utils.timeout import call_with_timeout
 
 
@@ -100,77 +101,92 @@ class MCPManager:
         )
 
     def list_files(self, directory: Path) -> str:
-        client = self._ensure_filesystem_client()
-        ok, value, err = call_with_timeout(lambda: client.list_directory(directory), timeout_s=self._operation_timeout_s)
-        if ok:
-            return str(value)
-        client = self._restart_filesystem_client()
-        ok, value, err2 = call_with_timeout(lambda: client.list_directory(directory), timeout_s=self._operation_timeout_s)
-        if ok:
-            return str(value)
-        raise MCPManagerError(f"filesystem list timeout_or_error: {err2 or err}")
+        with PerfTrace("mcp_call", server="filesystem", operation="list_files"):
+            client = self._ensure_filesystem_client()
+            ok, value, err = call_with_timeout(lambda: client.list_directory(directory), timeout_s=self._operation_timeout_s)
+            if ok:
+                return str(value)
+            client = self._restart_filesystem_client()
+            ok, value, err2 = call_with_timeout(lambda: client.list_directory(directory), timeout_s=self._operation_timeout_s)
+            if ok:
+                return str(value)
+            raise MCPManagerError(f"filesystem list timeout_or_error: {err2 or err}")
 
     def read_file(self, file_path: Path) -> str:
-        client = self._ensure_filesystem_client()
-        ok, value, err = call_with_timeout(lambda: client.read_file(file_path), timeout_s=self._operation_timeout_s)
-        if ok:
-            return str(value)
-        client = self._restart_filesystem_client()
-        ok, value, err2 = call_with_timeout(lambda: client.read_file(file_path), timeout_s=self._operation_timeout_s)
-        if ok:
-            return str(value)
-        raise MCPManagerError(f"filesystem read timeout_or_error: {err2 or err}")
+        with PerfTrace("mcp_call", server="filesystem", operation="read_file"):
+            client = self._ensure_filesystem_client()
+            ok, value, err = call_with_timeout(lambda: client.read_file(file_path), timeout_s=self._operation_timeout_s)
+            if ok:
+                return str(value)
+            client = self._restart_filesystem_client()
+            ok, value, err2 = call_with_timeout(lambda: client.read_file(file_path), timeout_s=self._operation_timeout_s)
+            if ok:
+                return str(value)
+            raise MCPManagerError(f"filesystem read timeout_or_error: {err2 or err}")
 
     def ingest_langchain_docs(self, seed_url: str, max_pages: int, collection: str) -> dict[str, Any]:
+        ingest_timeout_s = max(float(self.settings.mcp.ingest_timeout_s), min(900.0, float(max_pages) * 30.0))
         client = self._ensure_local_knowledge_client()
+        previous_timeout = getattr(client, "_request_timeout_s", None)
+        if isinstance(previous_timeout, (int, float)):
+            client._request_timeout_s = float(ingest_timeout_s)
         ok, value, err = call_with_timeout(
             lambda: client.ingest_langchain_docs(seed_url=seed_url, max_pages=max_pages, collection=collection),
-            timeout_s=self._operation_timeout_s,
+            timeout_s=ingest_timeout_s,
         )
+        if isinstance(previous_timeout, (int, float)):
+            client._request_timeout_s = float(previous_timeout)
         if ok and isinstance(value, dict):
             return value
         client = self._restart_local_knowledge_client()
+        previous_timeout = getattr(client, "_request_timeout_s", None)
+        if isinstance(previous_timeout, (int, float)):
+            client._request_timeout_s = float(ingest_timeout_s)
         ok, value, err2 = call_with_timeout(
             lambda: client.ingest_langchain_docs(seed_url=seed_url, max_pages=max_pages, collection=collection),
-            timeout_s=self._operation_timeout_s,
+            timeout_s=ingest_timeout_s,
         )
+        if isinstance(previous_timeout, (int, float)):
+            client._request_timeout_s = float(previous_timeout)
         if ok and isinstance(value, dict):
             return value
         raise MCPManagerError(f"local_knowledge ingest timeout_or_error: {err2 or err}")
 
     def search_langchain_docs(self, query: str, top_k: int, collection: str) -> dict[str, Any]:
-        client = self._ensure_local_knowledge_client()
-        ok, value, err = call_with_timeout(
-            lambda: client.search_langchain_docs(query=query, top_k=top_k, collection=collection),
-            timeout_s=self._operation_timeout_s,
-        )
-        if ok and isinstance(value, dict):
-            return value
-        client = self._restart_local_knowledge_client()
-        ok, value, err2 = call_with_timeout(
-            lambda: client.search_langchain_docs(query=query, top_k=top_k, collection=collection),
-            timeout_s=self._operation_timeout_s,
-        )
-        if ok and isinstance(value, dict):
-            return value
-        raise MCPManagerError(f"local_knowledge search timeout_or_error: {err2 or err}")
+        with PerfTrace("mcp_call", server="local_knowledge", operation="search_langchain_docs"):
+            client = self._ensure_local_knowledge_client()
+            ok, value, err = call_with_timeout(
+                lambda: client.search_langchain_docs(query=query, top_k=top_k, collection=collection),
+                timeout_s=self._operation_timeout_s,
+            )
+            if ok and isinstance(value, dict):
+                return value
+            client = self._restart_local_knowledge_client()
+            ok, value, err2 = call_with_timeout(
+                lambda: client.search_langchain_docs(query=query, top_k=top_k, collection=collection),
+                timeout_s=self._operation_timeout_s,
+            )
+            if ok and isinstance(value, dict):
+                return value
+            raise MCPManagerError(f"local_knowledge search timeout_or_error: {err2 or err}")
 
     def web_search(self, query: str, max_results: int, search_depth: str) -> dict[str, Any]:
-        client = self._ensure_web_search_client()
-        ok, value, err = call_with_timeout(
-            lambda: client.search(query=query, max_results=max_results, search_depth=search_depth),
-            timeout_s=self._operation_timeout_s,
-        )
-        if ok and isinstance(value, dict):
-            return value
-        client = self._restart_web_search_client()
-        ok, value, err2 = call_with_timeout(
-            lambda: client.search(query=query, max_results=max_results, search_depth=search_depth),
-            timeout_s=self._operation_timeout_s,
-        )
-        if ok and isinstance(value, dict):
-            return value
-        raise MCPManagerError(f"web_search timeout_or_error: {err2 or err}")
+        with PerfTrace("mcp_call", server="web_search", operation="web_search"):
+            client = self._ensure_web_search_client()
+            ok, value, err = call_with_timeout(
+                lambda: client.search(query=query, max_results=max_results, search_depth=search_depth),
+                timeout_s=self._operation_timeout_s,
+            )
+            if ok and isinstance(value, dict):
+                return value
+            client = self._restart_web_search_client()
+            ok, value, err2 = call_with_timeout(
+                lambda: client.search(query=query, max_results=max_results, search_depth=search_depth),
+                timeout_s=self._operation_timeout_s,
+            )
+            if ok and isinstance(value, dict):
+                return value
+            raise MCPManagerError(f"web_search timeout_or_error: {err2 or err}")
 
     def invoke_tool(self, server: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if not tool.strip():

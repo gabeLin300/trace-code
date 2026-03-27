@@ -64,7 +64,6 @@ def _init_context(settings: TraceSettings, no_banner: bool, session_id: str, sta
     mcp_manager: MCPManager | None = None
     if start_mcp:
         mcp_manager = MCPManager(settings=settings, workspace_root=Path(settings.workspace_root))
-        mcp_manager.start()
 
     return CLIContext(
         settings=settings,
@@ -269,7 +268,6 @@ def run_interactive_session(
     session_id: str = "default",
 ) -> SessionRecord:
     ctx = _init_context(settings, no_banner=no_banner, session_id=session_id, start_mcp=True)
-    first_request_done = False
 
     if ctx.banner:
         output_fn(ctx.banner)
@@ -286,12 +284,6 @@ def run_interactive_session(
             if not user_input:
                 continue
             _debug(output_fn, f"command received: {user_input}")
-
-            if not first_request_done and ctx.mcp_manager is not None:
-                _debug(output_fn, "first-request MCP warmup start")
-                warm = ctx.mcp_manager.prime()
-                _debug(output_fn, f"first-request MCP warmup end: {warm}")
-                first_request_done = True
 
             ctx.session.command_history.append(user_input)
             route = route_user_input(user_input)
