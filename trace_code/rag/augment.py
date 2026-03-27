@@ -94,6 +94,8 @@ def should_use_local_knowledge(query: str) -> bool:
     lowered = query.lower()
     signals = (
         "langchain",
+        "chain",
+        "chains",
         "rag",
         "retriever",
         "vector db",

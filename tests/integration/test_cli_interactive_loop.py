@@ -33,6 +33,24 @@ def test_interactive_loop_handles_builtins_and_exit(tmp_path) -> None:
     assert session.command_history == ["/help", "/config", "/sessions", "/exit"]
 
 
+def test_interactive_loop_tools_builtin_shows_typed_and_dynamic(tmp_path) -> None:
+    settings = TraceSettings(workspace_root=tmp_path)
+    outputs = []
+    run_interactive_session(
+        settings=settings,
+        input_fn=_make_input(["/tools", "/exit"]),
+        output_fn=outputs.append,
+        no_banner=True,
+        session_id="s-tools",
+    )
+
+    joined = "\n".join(outputs)
+    assert "typed_tools=" in joined
+    assert "dynamic.filesystem=" in joined
+    assert "dynamic.local_knowledge=" in joined
+    assert "dynamic.web_search=" in joined
+
+
 def test_interactive_loop_persists_agent_turns(tmp_path) -> None:
     settings = TraceSettings(workspace_root=tmp_path)
     outputs = []

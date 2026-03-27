@@ -52,9 +52,11 @@ class MCPManager:
         self._startup_timeout_s: float = float(self.settings.mcp.startup_timeout_s)
         self._tools_timeout_s: float = float(self.settings.mcp.tools_timeout_s)
         self._operation_timeout_s: float = float(self.settings.mcp.operation_timeout_s)
+        self._closed: bool = False
 
     def start(self) -> None:
         # Eager startup for managed local MCP flows. Failures are tolerated and retried lazily on first use.
+        self._closed = False
         if self.settings.mcp.mode not in {"managed", "hybrid"}:
             return
         self._try_start_filesystem()
@@ -63,6 +65,7 @@ class MCPManager:
 
     def prime(self) -> dict[str, str]:
         """Best-effort first-request warmup with bounded timeouts."""
+        self._closed = False
         started: dict[str, str] = {}
         self._try_start_filesystem()
         self._try_start_local_knowledge()
@@ -73,6 +76,7 @@ class MCPManager:
         return started
 
     def close(self) -> None:
+        self._closed = True
         for client in (self._filesystem_client, self._local_knowledge_client, self._web_search_client):
             if client is None:
                 continue
@@ -82,6 +86,8 @@ class MCPManager:
         self._web_search_client = None
 
     def health(self) -> MCPHealth:
+        if self._closed:
+            return MCPHealth(filesystem=False, local_knowledge=False, web_search=False)
         # Probe/reconnect on demand so /health reflects current runtime, not only startup snapshot.
         if self.settings.mcp.mode in {"managed", "hybrid"}:
             self._try_start_filesystem()

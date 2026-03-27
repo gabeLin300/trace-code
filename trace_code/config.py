@@ -47,6 +47,7 @@ class MCPSettings:
 @dataclass
 class UISettings:
     show_banner: bool = True
+    stream_responses: bool = True
 
 
 @dataclass

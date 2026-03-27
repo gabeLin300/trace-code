@@ -175,3 +175,64 @@ def test_search_uses_fusion_retrieval_and_rrf(monkeypatch, tmp_path: Path) -> No
     sources = [item["metadata"]["source_url"] for item in result["results"]]
     assert set(sources) == {"a", "b"}
     assert all("fusion_score" in item for item in result["results"])
+    assert result["results"][0]["fusion_score"] >= result["results"][1]["fusion_score"]
+
+
+def test_search_reuses_existing_vector_store_without_reingest(monkeypatch, tmp_path: Path) -> None:
+    calls = {"crawl": 0, "split": 0}
+
+    docs = [
+        kb.LangChainDoc(
+            url="https://python.langchain.com/docs/introduction/",
+            title="Intro",
+            text="intro text",
+            fetched_at="2026-03-21T00:00:00+00:00",
+        )
+    ]
+    chunks = [
+        {
+            "id": "id-1",
+            "text": "Doc A",
+            "metadata": {"source_url": docs[0].url, "chunk_index": 0},
+        }
+    ]
+
+    def _crawl(seed_url, max_pages=25):
+        calls["crawl"] += 1
+        return docs
+
+    def _split(_docs):
+        calls["split"] += 1
+        return chunks
+
+    monkeypatch.setattr(kb, "crawl_langchain_docs", _crawl)
+    monkeypatch.setattr(kb, "semantic_split_documents", _split)
+
+    class FakeCollection:
+        def __init__(self):
+            self.docs = []
+            self.metas = []
+
+        def upsert(self, ids, documents, metadatas):
+            self.docs = list(documents)
+            self.metas = list(metadatas)
+
+        def query(self, query_texts, n_results, include):
+            return {
+                "documents": [self.docs[:1] or ["Doc A"]],
+                "metadatas": [self.metas[:1] or [{"source_url": "https://python.langchain.com/docs/introduction/"}]],
+                "distances": [[0.11]],
+            }
+
+    fake_collection = FakeCollection()
+    monkeypatch.setattr(kb, "_chroma_collection", lambda persist_dir, collection_name: fake_collection)
+
+    persist_dir = tmp_path / "vector_db"
+    kb.index_langchain_docs(seed_url="https://python.langchain.com/docs/introduction/", persist_dir=persist_dir)
+
+    # Simulate a later session: search should reuse persisted vectors and not call ingestion pipeline.
+    kb.search_langchain_docs("retrieval", persist_dir=persist_dir, top_k=1)
+    kb.search_langchain_docs("chains", persist_dir=persist_dir, top_k=1)
+
+    assert calls["crawl"] == 1
+    assert calls["split"] == 1

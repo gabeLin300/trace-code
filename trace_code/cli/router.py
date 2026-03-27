@@ -1,4 +1,4 @@
-KNOWN_COMMANDS = {"/help", "/config", "/sessions", "/health", "/exit"}
+KNOWN_COMMANDS = {"/help", "/config", "/sessions", "/health", "/tools", "/exit"}
 
 
 def route_user_input(user_input: str) -> str:

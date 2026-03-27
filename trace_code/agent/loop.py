@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 from pathlib import Path
+import time
 from typing import Callable
 
 from trace_code.config import TraceSettings
@@ -107,6 +108,7 @@ def run_agentic_task(
                     "output": tool_result.get("response", ""),
                     "arguments": tool_result.get("arguments", {}),
                     "confirmation_required": tool_result.get("confirmation_required", False),
+                    "elapsed_ms": tool_result.get("elapsed_ms", 0),
                 }
             )
 
@@ -210,6 +212,7 @@ def _execute_action(
     debug_fn: Callable[[str], None] | None = None,
 ) -> dict:
     try:
+        started = time.monotonic()
         if tool_name:
             _assert_tool_executable(tool_name=tool_name, mcp_manager=mcp_manager)
             ok, value, err = call_with_timeout(
@@ -245,6 +248,7 @@ def _execute_action(
             "response": tool_result["output"],
             "arguments": tool_result.get("arguments", arguments),
             "confirmation_required": bool(tool_result.get("confirmation_required", False)),
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
         }
     except ToolExecutionError as exc:
         _emit_debug(debug_fn, f"execute error: {exc}")

@@ -14,6 +14,7 @@ from trace_code.llm.manager import LLMManager
 from trace_code.llm.manager import parse_provider_route
 from trace_code.mcp.manager import MCPManager
 from trace_code.sessions.store import SessionRecord, SessionStore
+from trace_code.tools.executor import supported_tool_specs
 from trace_code.utils.timeout import call_with_timeout
 from trace_code.workspace.bootstrap import bootstrap_workspace
 
@@ -40,6 +41,7 @@ HELP_TEXT = (
     "  /config    Show active configuration summary\n"
     "  /sessions  Show current session details\n"
     "  /health    Run provider/auth diagnostics\n"
+    "  /tools     Show typed + dynamic MCP tool inventory\n"
     "  /exit      Exit the CLI"
 )
 
@@ -74,12 +76,15 @@ def _init_context(settings: TraceSettings, no_banner: bool, session_id: str, sta
 
 
 def _summarize_config(settings: TraceSettings) -> str:
+    execution_mode = "confirm" if settings.safety.confirm_non_read else "auto_execute"
     return (
         f"provider.default={settings.llm.default}\n"
         f"provider.fallback={settings.llm.fallback}\n"
         f"openai.enabled={settings.llm.openai_enabled}\n"
         f"mcp.mode={settings.mcp.mode}\n"
         f"ui.show_banner={settings.ui.show_banner}\n"
+        f"ui.stream_responses={settings.ui.stream_responses}\n"
+        f"safety.execution_mode={execution_mode}\n"
         f"safety.confirm_non_read={settings.safety.confirm_non_read}\n"
         f"safety.read_only={settings.safety.read_only}"
     )
@@ -92,10 +97,13 @@ def _sessions_text(ctx: CLIContext) -> str:
 
 def _startup_header_text(settings: TraceSettings) -> str:
     route = parse_provider_route(settings.llm.default)
+    execution_mode = "confirm" if settings.safety.confirm_non_read else "auto_execute"
     return (
         f"workspace: {Path(settings.workspace_root).resolve()}\n"
         f"provider: {route.provider}\n"
-        f"model: {route.model}"
+        f"model: {route.model}\n"
+        f"execution_mode: {execution_mode}\n"
+        f"stream_responses: {settings.ui.stream_responses}"
     )
 
 
@@ -144,9 +152,26 @@ def _handle_builtin(command: str, ctx: CLIContext) -> tuple[str, bool]:
         return _sessions_text(ctx), False
     if command == "/health":
         return _provider_health_text(ctx), False
+    if command == "/tools":
+        return _tools_text(ctx), False
     if command == "/exit":
         return "Exiting trace.", True
     return f"Unknown command: {command}", False
+
+
+def _tools_text(ctx: CLIContext) -> str:
+    typed = [spec["name"] for spec in supported_tool_specs()]
+    lines = [
+        "typed_tools=" + ", ".join(typed),
+    ]
+    if ctx.mcp_manager is None:
+        lines.append("dynamic_mcp_tools=(mcp manager not started)")
+        return "\n".join(lines)
+    dynamic = ctx.mcp_manager.available_tools()
+    for server_name in ("filesystem", "local_knowledge", "web_search"):
+        tools = dynamic.get(server_name, [])
+        lines.append(f"dynamic.{server_name}={tools}")
+    return "\n".join(lines)
 
 
 def _mask_key(raw: str) -> str:
@@ -295,10 +320,12 @@ def run_interactive_session(
                 args = tool_step.get("arguments", {})
                 required = bool(tool_step.get("confirmation_required", False))
                 status = str(tool_step.get("status", "unknown"))
+                elapsed_ms = int(tool_step.get("elapsed_ms", 0) or 0)
                 summary = _summarize_tool_output(str(tool_step.get("output", "")))
                 output_fn(
                     f"[loop step {tool_step.get('step')}] tool={tool_name} "
-                    f"server={server} status={status} args={args} confirmation_required={required}"
+                    f"server={server} status={status} elapsed_ms={elapsed_ms} "
+                    f"args={args} confirmation_required={required}"
                 )
                 output_fn(f"[loop step {tool_step.get('step')}] result_or_blocked={summary}")
             if stop_reason:
@@ -325,7 +352,7 @@ def run_interactive_session(
                 )
 
             ctx.store.save(ctx.session)
-            output_fn(response)
+            _emit_response(output_fn, response, stream=ctx.settings.ui.stream_responses)
     finally:
         if ctx.mcp_manager is not None:
             ctx.mcp_manager.close()
@@ -360,3 +387,32 @@ def _tool_server_name(tool_name: str) -> str:
     if normalized.startswith("shell."):
         return "local_shell"
     return "unknown"
+
+
+def _emit_response(output_fn: Callable[[str], None], response: str, *, stream: bool) -> None:
+    if not stream:
+        output_fn(response)
+        return
+    chunks = _stream_chunks(response)
+    output_fn(f"[stream] chunks={len(chunks)}")
+    for chunk in chunks:
+        output_fn(chunk)
+
+
+def _stream_chunks(text: str, chunk_size: int = 220) -> list[str]:
+    normalized = text.strip()
+    if not normalized:
+        return [""]
+    words = normalized.split()
+    chunks: list[str] = []
+    current = ""
+    for word in words:
+        candidate = (current + " " + word).strip()
+        if len(candidate) > chunk_size and current:
+            chunks.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
