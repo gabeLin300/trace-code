@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 import shlex
+import shutil
+import sys
 
 
 @dataclass
 class LLMSettings:
-    default: str = "groq:llama-3.3-70b-versatile"
+    default: str = "groq:openai/gpt-oss-120b"
     ollama_fallback: str = "ollama:qwen3:14b-instruct"
     fallback: str = "groq:llama-3.1-8b-instant"
     openai_enabled: bool = False
@@ -18,16 +21,27 @@ class MCPSettings:
     mode: str = "managed"
     filesystem_server_command: str = "npx -y @modelcontextprotocol/server-filesystem"
     local_knowledge_server_command: str = "python -m trace_code.mcp.local_knowledge_server"
-    web_search_server_command: str = "python -m trace_code.mcp.web_search_server"
+    web_search_server_command: str = "python -m trace_code.mcp.web_search_server --no-prompt"
+    startup_timeout_s: float = 8.0
+    tools_timeout_s: float = 3.0
+    operation_timeout_s: float = 20.0
 
     def filesystem_server_argv(self) -> list[str]:
-        return shlex.split(self.filesystem_server_command)
+        argv = shlex.split(self.filesystem_server_command)
+        if not argv:
+            return argv
+        first = argv[0].lower()
+        if first in {"npx", "npx.cmd"}:
+            resolved = _resolve_npx_executable()
+            if resolved:
+                argv[0] = resolved
+        return argv
 
     def local_knowledge_server_argv(self) -> list[str]:
-        return shlex.split(self.local_knowledge_server_command)
+        return _resolve_python_argv(shlex.split(self.local_knowledge_server_command))
 
     def web_search_server_argv(self) -> list[str]:
-        return shlex.split(self.web_search_server_command)
+        return _resolve_python_argv(shlex.split(self.web_search_server_command))
 
 
 @dataclass
@@ -75,3 +89,26 @@ class TraceSettings:
     retry: RetrySettings = field(default_factory=RetrySettings)
     rag: RagSettings = field(default_factory=RagSettings)
     web_search: WebSearchSettings = field(default_factory=WebSearchSettings)
+
+
+def _resolve_python_argv(argv: list[str]) -> list[str]:
+    if not argv:
+        return argv
+    first = argv[0].lower()
+    if first in {"python", "python3", "py"}:
+        argv = [sys.executable, *argv[1:]]
+    return argv
+
+
+def _resolve_npx_executable() -> str | None:
+    candidates = []
+    if os.name == "nt":
+        candidates.extend(["npx.cmd", "npx.exe", "npx"])
+    else:
+        candidates.append("npx")
+
+    for candidate in candidates:
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    return None

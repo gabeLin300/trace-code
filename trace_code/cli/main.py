@@ -4,6 +4,7 @@ import argparse
 import getpass
 
 from trace_code.cli.app import run_interactive_session
+from trace_code.cli.preflight import run_preflight
 from trace_code.config import TraceSettings
 from trace_code.config_init import ensure_initial_config
 
@@ -12,6 +13,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="trace", description="trace-code CLI assistant")
     parser.add_argument("--no-banner", action="store_true", help="Disable ASCII startup banner")
     parser.add_argument("--session-id", default="default", help="Session ID to load/create")
+    parser.add_argument("--preflight", action="store_true", help="Run environment readiness checks and exit")
     args = parser.parse_args()
 
     settings = TraceSettings()
@@ -26,7 +28,15 @@ def main() -> int:
         settings,
         secret_prompt_fn=getpass.getpass,
         output_fn=_write,
+        prompt_if_missing=False,
     )
+
+    report = run_preflight(settings)
+    _write(report.render())
+    if not report.ok:
+        return 2
+    if args.preflight:
+        return 0
 
     run_interactive_session(
         settings=settings,

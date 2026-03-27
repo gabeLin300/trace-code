@@ -8,4 +8,6 @@ def route_tool(tool_name: str) -> str:
         return "local_knowledge"
     if tool_name.startswith("web."):
         return "web_search"
+    if tool_name.startswith("mcp."):
+        return "dynamic"
     raise ValueError(f"Unknown tool namespace: {tool_name}")

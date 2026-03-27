@@ -5,7 +5,7 @@ from pathlib import Path
 from trace_code.config import TraceSettings
 from trace_code.knowledge.langchain_docs import search_langchain_docs
 from trace_code.mcp.manager import MCPManager
-from trace_code.mcp.web_search_server import TavilyError, resolve_tavily_api_key, tavily_search
+from trace_code.mcp.web_search_server import resolve_tavily_api_key, tavily_search
 
 
 def build_augmented_prompt(
@@ -54,6 +54,9 @@ def _retrieve_local_knowledge_context(
     workspace_root: Path,
     mcp_manager: MCPManager | None,
 ) -> str:
+    if not should_use_local_knowledge(query):
+        return ""
+
     try:
         if mcp_manager is not None:
             result = mcp_manager.search_langchain_docs(
@@ -85,6 +88,21 @@ def _retrieve_local_knowledge_context(
         if text:
             lines.append(f"{idx}. {source_url}\n{text}")
     return "\n\n".join(lines)
+
+
+def should_use_local_knowledge(query: str) -> bool:
+    lowered = query.lower()
+    signals = (
+        "langchain",
+        "rag",
+        "retriever",
+        "vector db",
+        "chroma",
+        "mcp",
+        "documentation",
+        "docs",
+    )
+    return any(sig in lowered for sig in signals)
 
 
 def _maybe_retrieve_web_context(

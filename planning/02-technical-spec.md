@@ -84,6 +84,10 @@ Behavior:
 - If tool is requested, route through tool router and append structured results.
 - If no tool is required, produce final answer and persist turn state.
 - Iteration continues until completion criteria or guard limits are reached (`max_steps`).
+- Loop guardrails include:
+  - repeated tool-command detection
+  - no-progress detection based on unchanged consecutive tool outputs
+  - explicit stop reason emitted in runtime output (`done`, `blocked`, `error`, `step_limit`, `no_progress`, `repeated_tool`)
 
 ### LLM Provider Interface
 Provider adapters must expose a shared contract:

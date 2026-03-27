@@ -12,6 +12,7 @@ def ensure_initial_config(
     *,
     secret_prompt_fn: Callable[[str], str],
     output_fn: Callable[[str], None],
+    prompt_if_missing: bool = True,
 ) -> None:
     """Load .env and prompt for missing required API keys."""
     workspace_root = Path(settings.workspace_root)
@@ -33,6 +34,9 @@ def ensure_initial_config(
             missing.append(key)
 
     if not missing:
+        return
+
+    if not prompt_if_missing:
         return
 
     output_fn("Initial setup: missing API keys detected. You'll be prompted once and values will be saved to .env.")

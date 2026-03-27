@@ -38,6 +38,13 @@ pip install -r requirements.txt
 trace
 ```
 
+MCP preflight (optional but recommended before `trace`):
+```bash
+npx --version
+python -m trace_code.mcp.local_knowledge_server --help
+python -m trace_code.mcp.web_search_server --no-prompt --help
+```
+
 Useful flags:
 ```bash
 trace --session-id main

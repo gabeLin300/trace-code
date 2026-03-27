@@ -1,12 +1,22 @@
 from __future__ import annotations
+import json
 from pathlib import Path
+from typing import Callable
 
 from trace_code.config import TraceSettings
 from trace_code.llm.base import ProviderError, ProviderSelectionError
 from trace_code.llm.manager import LLMManager
 from trace_code.mcp.manager import MCPManager
 from trace_code.rag.augment import build_augmented_prompt
-from trace_code.tools.executor import ToolExecutionError, execute_tool_from_prompt, prompt_requests_tool
+from trace_code.tools.executor import (
+    ToolExecutionError,
+    execute_tool_call,
+    execute_tool_from_prompt,
+    normalize_tool_name,
+    prompt_requests_tool,
+    supported_tool_specs,
+)
+from trace_code.utils.timeout import call_with_timeout
 
 
 def run_agentic_task(
@@ -16,113 +26,126 @@ def run_agentic_task(
     provider_override: str | None = None,
     mcp_manager: MCPManager | None = None,
     max_steps: int = 4,
+    debug_fn: Callable[[str], None] | None = None,
 ) -> dict:
-    """
-    Run a bounded autonomous task loop.
-
-    Behavior:
-    - If input is not tool-oriented, answer directly with the LLM.
-    - If input is tool-oriented, execute the tool, then ask the LLM whether to:
-      - continue with another tool command, or
-      - return a final answer.
-    """
+    """Run a bounded autonomous loop with explicit planner/executor/evaluator stages."""
     settings = settings or TraceSettings()
     manager = LLMManager(settings)
 
     steps: list[dict] = []
     tools: list[dict] = []
-    current_tool_command = ""
-    final_response = ""
+    action_history: list[str] = []
+    output_signatures: list[str] = []
+    latest_tool_name = ""
+    latest_tool_output = ""
 
-    if prompt_requests_tool(user_input):
-        current_tool_command = user_input
-    else:
-        initial_decision = _decide_initial_action(
+    for step_idx in range(1, max_steps + 1):
+        _emit_debug(debug_fn, f"loop step {step_idx} start")
+        _emit_debug(debug_fn, f"loop step {step_idx} planning start")
+        decision = _plan_next_action(
             manager=manager,
             user_input=user_input,
+            latest_tool_name=latest_tool_name,
+            latest_tool_output=latest_tool_output,
             settings=settings,
             provider_override=provider_override,
             mcp_manager=mcp_manager,
+            is_first_step=(step_idx == 1),
+            debug_fn=debug_fn,
         )
-        steps.append({"step": 0, "kind": "initial_decision", **initial_decision})
-        if initial_decision["action"] == "final":
-            return {
-                "status": "answered",
-                "response": initial_decision["payload"],
-                "steps": steps,
-                "tools": [],
-            }
-        current_tool_command = initial_decision["payload"]
+        _emit_debug(debug_fn, f"loop step {step_idx} planning end action={decision.get('action')}")
+        steps.append({"step": step_idx, "kind": "decision", **decision})
+        if decision["action"] == "final":
+            _emit_debug(debug_fn, f"loop step {step_idx} finalize done")
+            return _finalize_result(
+                status="answered" if not tools else "answered_with_tools",
+                response=decision["payload"],
+                steps=steps,
+                tools=tools,
+                stop_reason="done",
+            )
 
-    for step_idx in range(1, max_steps + 1):
-        tool_result = _run_tool_step(
-            user_input=current_tool_command,
+        command = decision.get("payload", "")
+        tool_name = decision.get("tool_name", "")
+        arguments = decision.get("arguments", {})
+        next_action_key = f"{tool_name}:{json.dumps(arguments, sort_keys=True)}" if tool_name else str(command)
+        guard = _evaluate_progress_guardrails(
+            next_action_key=next_action_key,
+            action_history=action_history,
+            output_signatures=output_signatures,
+        )
+        if guard is not None:
+            steps.append({"step": step_idx, "kind": "guardrail", **guard})
+            _emit_debug(debug_fn, f"loop step {step_idx} guardrail stop={guard['stop_reason']}")
+            return _finalize_result(
+                status=guard["status"],
+                response=guard["response"],
+                steps=steps,
+                tools=tools,
+                stop_reason=guard["stop_reason"],
+            )
+
+        action_history.append(next_action_key)
+        _emit_debug(debug_fn, f"loop step {step_idx} execute start tool={tool_name or command}")
+        tool_result = _execute_action(
+            command=command,
+            tool_name=tool_name,
+            arguments=arguments,
             settings=settings,
             mcp_manager=mcp_manager,
+            debug_fn=debug_fn,
         )
-        step = {"step": step_idx, "kind": "tool", **tool_result}
-        steps.append(step)
+        _emit_debug(debug_fn, f"loop step {step_idx} execute end status={tool_result.get('status')}")
+        steps.append({"step": step_idx, "kind": "tool", **tool_result})
 
-        tool_name = step.get("tool")
-        if tool_name:
+        if tool_result.get("tool"):
             tools.append(
                 {
                     "step": step_idx,
-                    "tool_name": tool_name,
-                    "status": step.get("status", "ok"),
-                    "output": step.get("response", ""),
+                    "tool_name": tool_result.get("tool", "unknown"),
+                    "status": tool_result.get("status", "unknown"),
+                    "output": tool_result.get("response", ""),
+                    "arguments": tool_result.get("arguments", {}),
+                    "confirmation_required": tool_result.get("confirmation_required", False),
                 }
             )
 
-        status = step.get("status")
-        if status in {"error", "blocked", "requires_confirmation"}:
-            return {
-                "status": status,
-                "response": step.get("response", ""),
-                "steps": steps,
-                "tools": tools,
-                "tool": step.get("tool"),
-                "tool_status": step.get("tool_status"),
-            }
+        if tool_result.get("status") in {"error", "blocked", "requires_confirmation"}:
+            _emit_debug(debug_fn, f"loop step {step_idx} stop_reason={tool_result.get('status')}")
+            if tool_result.get("status") == "error" and latest_tool_output:
+                partial = (
+                    f"{latest_tool_output}\n\n"
+                    f"Note: a follow-up tool call failed, so I returned the best available result. "
+                    f"{tool_result.get('response', '')}"
+                )
+                return _finalize_result(
+                    status="answered_with_tools",
+                    response=partial,
+                    steps=steps,
+                    tools=tools,
+                    stop_reason="partial_error",
+                )
+            return _finalize_result(
+                status=str(tool_result.get("status", "error")),
+                response=str(tool_result.get("response", "")),
+                steps=steps,
+                tools=tools,
+                stop_reason="blocked" if tool_result.get("status") in {"blocked", "requires_confirmation"} else "error",
+            )
 
-        decision = _decide_next_action(
-            manager=manager,
-            original_user_input=user_input,
-            latest_tool_name=str(step.get("tool", "")),
-            latest_tool_output=str(step.get("response", "")),
-            settings=settings,
-            provider_override=provider_override,
-            mcp_manager=mcp_manager,
-        )
-        steps.append({"step": step_idx, "kind": "decision", **decision})
+        latest_tool_name = str(tool_result.get("tool", ""))
+        latest_tool_output = str(tool_result.get("response", ""))
+        output_signatures.append(_output_signature(latest_tool_name, latest_tool_output))
+        _emit_debug(debug_fn, f"loop step {step_idx} end")
 
-        if decision["action"] == "tool":
-            current_tool_command = decision["payload"]
-            continue
-
-        final_response = decision["payload"]
-        return {
-            "status": "answered_with_tools",
-            "response": final_response,
-            "steps": steps,
-            "tools": tools,
-            "tool": tools[-1]["tool_name"] if tools else None,
-            "tool_status": tools[-1]["status"] if tools else None,
-        }
-
-    if not final_response and steps:
-        final_response = str(steps[-1].get("response", "")).strip()
-    if not final_response:
-        final_response = "Completed available tool steps."
-
-    return {
-        "status": "step_limit_reached",
-        "response": final_response,
-        "steps": steps,
-        "tools": tools,
-        "tool": tools[-1]["tool_name"] if tools else None,
-        "tool_status": tools[-1]["status"] if tools else None,
-    }
+    _emit_debug(debug_fn, "loop stop_reason=step_limit")
+    return _finalize_result(
+        status="step_limit_reached",
+        response=latest_tool_output or "Stopped due to step limit before final answer.",
+        steps=steps,
+        tools=tools,
+        stop_reason="step_limit",
+    )
 
 
 def run_turn(
@@ -177,48 +200,77 @@ def run_turn(
     }
 
 
-def _run_tool_step(
+def _execute_action(
     *,
-    user_input: str,
+    command: str,
+    tool_name: str,
+    arguments: dict,
     settings: TraceSettings,
     mcp_manager: MCPManager | None,
+    debug_fn: Callable[[str], None] | None = None,
 ) -> dict:
     try:
-        tool_result = execute_tool_from_prompt(
-            user_input=user_input,
-            workspace_root=Path(settings.workspace_root),
-            settings=settings,
-            mcp_manager=mcp_manager,
-        )
+        if tool_name:
+            _assert_tool_executable(tool_name=tool_name, mcp_manager=mcp_manager)
+            ok, value, err = call_with_timeout(
+                lambda: execute_tool_call(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    workspace_root=Path(settings.workspace_root),
+                    settings=settings,
+                    mcp_manager=mcp_manager,
+                ),
+                timeout_s=30.0,
+            )
+            if not ok:
+                raise ToolExecutionError(f"tool execution timeout/error: {err}")
+            tool_result = value
+        else:
+            ok, value, err = call_with_timeout(
+                lambda: execute_tool_from_prompt(
+                    user_input=command,
+                    workspace_root=Path(settings.workspace_root),
+                    settings=settings,
+                    mcp_manager=mcp_manager,
+                ),
+                timeout_s=30.0,
+            )
+            if not ok:
+                raise ToolExecutionError(f"tool execution timeout/error: {err}")
+            tool_result = value
         return {
             "status": "tool_called" if tool_result.get("status") == "ok" else tool_result.get("status", "tool_called"),
             "tool": tool_result["tool_name"],
             "tool_status": tool_result.get("status", "ok"),
             "response": tool_result["output"],
+            "arguments": tool_result.get("arguments", arguments),
+            "confirmation_required": bool(tool_result.get("confirmation_required", False)),
         }
     except ToolExecutionError as exc:
+        _emit_debug(debug_fn, f"execute error: {exc}")
         return {"status": "error", "response": f"Tool error: {exc}"}
 
 
-def _decide_next_action(
+def _plan_next_action(
     *,
     manager: LLMManager,
-    original_user_input: str,
+    user_input: str,
     latest_tool_name: str,
     latest_tool_output: str,
     settings: TraceSettings,
     provider_override: str | None,
     mcp_manager: MCPManager | None,
+    is_first_step: bool,
+    debug_fn: Callable[[str], None] | None = None,
 ) -> dict[str, str]:
-    decision_prompt = (
-        "You are deciding the next step for an autonomous coding assistant.\n"
-        "Given the user goal and latest tool result, return exactly one line:\n"
-        "TOOL: <next tool command>\n"
-        "or\n"
-        "FINAL: <final user-facing answer>\n\n"
-        f"User goal:\n{original_user_input}\n\n"
-        f"Latest tool:\n{latest_tool_name}\n\n"
-        f"Latest tool output:\n{latest_tool_output}\n"
+    stage = "first" if is_first_step else "next"
+    available_tools = _available_tools_for_prompt(mcp_manager)
+    decision_prompt = _decision_prompt(
+        user_input=user_input,
+        latest_tool_name=latest_tool_name,
+        latest_tool_output=latest_tool_output,
+        stage=stage,
+        available_tools=available_tools,
     )
     prompt = build_augmented_prompt(
         decision_prompt,
@@ -227,77 +279,210 @@ def _decide_next_action(
         mcp_manager=mcp_manager,
     )
     try:
-        response = manager.generate(prompt=prompt, provider_override=provider_override)
-        text = response.content.strip()
-    except (ProviderError, ProviderSelectionError):
-        return {"action": "final", "payload": latest_tool_output}
-
-    if text.lower().startswith("tool:"):
-        payload = text.split(":", 1)[1].strip()
-        if payload:
-            return {"action": "tool", "payload": payload}
-    if text.lower().startswith("final:"):
-        payload = text.split(":", 1)[1].strip()
-        if payload:
-            return {"action": "final", "payload": payload}
-
-    # Fall back to final response if the model does not follow the strict output format.
-    return {"action": "final", "payload": text or latest_tool_output}
-
-
-def _decide_initial_action(
-    *,
-    manager: LLMManager,
-    user_input: str,
-    settings: TraceSettings,
-    provider_override: str | None,
-    mcp_manager: MCPManager | None,
-) -> dict[str, str]:
-    prompt_text = (
-        "You are deciding the first action for an autonomous coding assistant.\n"
-        "Return exactly one line in one of these forms:\n"
-        "TOOL: <tool command>\n"
-        "FINAL: <direct answer>\n\n"
-        "When the user asks for filesystem actions, web search, shell commands, or local docs retrieval, prefer TOOL.\n"
-        "Tool command examples:\n"
-        "- list files\n"
-        "- read file README.md\n"
-        "- search langchain docs for retrievers\n"
-        "- search web for latest langchain release\n"
-        "- run command git status\n\n"
-        f"User request:\n{user_input}\n"
-    )
-    prompt = build_augmented_prompt(
-        prompt_text,
-        settings=settings,
-        workspace_root=Path(settings.workspace_root),
-        mcp_manager=mcp_manager,
-    )
-    try:
-        response = manager.generate(prompt=prompt, provider_override=provider_override)
-        text = response.content.strip()
-    except (ProviderError, ProviderSelectionError):
-        # Fall back to direct answer behavior when model planning step cannot run.
-        direct_prompt = build_augmented_prompt(
-            user_input,
-            settings=settings,
-            workspace_root=Path(settings.workspace_root),
-            mcp_manager=mcp_manager,
+        _emit_debug(debug_fn, "provider/model invocation start")
+        ok, response, err = call_with_timeout(
+            lambda: manager.generate(prompt=prompt, provider_override=provider_override),
+            timeout_s=45.0,
         )
+        _emit_debug(debug_fn, "provider/model invocation end")
+        if not ok:
+            raise ProviderError(f"model invocation timeout/error: {err}")
+        text = response.content.strip()
+    except (ProviderError, ProviderSelectionError) as exc:
+        if is_first_step:
+            if prompt_requests_tool(user_input):
+                # If user explicitly requested a tool command, preserve usability.
+                return {"action": "tool", "payload": user_input, "tool_name": "", "arguments": {}}
+            # Try a direct response as graceful fallback when the planner step cannot run.
+            direct_prompt = build_augmented_prompt(
+                user_input,
+                settings=settings,
+                workspace_root=Path(settings.workspace_root),
+                mcp_manager=mcp_manager,
+            )
+            try:
+                ok, direct, err = call_with_timeout(
+                    lambda: manager.generate(prompt=direct_prompt, provider_override=provider_override),
+                    timeout_s=45.0,
+                )
+                if not ok:
+                    raise ProviderError(f"model invocation timeout/error: {err}")
+                return {"action": "final", "payload": direct.content}
+            except (ProviderError, ProviderSelectionError) as inner_exc:
+                return {"action": "final", "payload": f"LLM error: {inner_exc}"}
+        return {"action": "final", "payload": latest_tool_output or f"LLM error: {exc}"}
+
+    decision = _parse_decision_response(text=text, fallback=latest_tool_output or text)
+    if is_first_step and prompt_requests_tool(user_input) and decision["action"] == "final":
+        return {"action": "tool", "payload": user_input, "tool_name": "", "arguments": {}}
+    return decision
+
+
+def _decision_prompt(*, user_input: str, latest_tool_name: str, latest_tool_output: str, stage: str, available_tools: str) -> str:
+    return (
+        "You are deciding the action for an autonomous coding assistant.\n"
+        "Return a single JSON object with one of these shapes:\n"
+        '{"action":"tool","tool":"<tool_name>","arguments":{...}}\n'
+        '{"action":"final","response":"<final user-facing answer>"}\n'
+        "If you need tools, choose only from the available tool list below.\n\n"
+        "When using a dynamically discovered MCP tool, call tool='mcp.call' with:\n"
+        '{"server":"<server_name>","tool":"<mcp_tool_name>","arguments":{...}}\n\n'
+        f"Available tools:\n{available_tools}\n\n"
+        f"Stage: {stage}\n"
+        f"User goal:\n{user_input}\n\n"
+        f"Latest tool:\n{latest_tool_name}\n\n"
+        f"Latest tool output:\n{latest_tool_output}\n"
+    )
+
+
+def _parse_decision_response(*, text: str, fallback: str) -> dict[str, str]:
+    stripped = text.strip()
+    parsed = _parse_json_payload(stripped)
+    if isinstance(parsed, dict):
+        action = str(parsed.get("action", "")).strip().lower()
+        if action == "tool":
+            tool_name = str(parsed.get("tool", "")).strip()
+            arguments = parsed.get("arguments", {})
+            if isinstance(arguments, dict):
+                if tool_name and not _is_supported_tool_name(tool_name):
+                    return {
+                        "action": "final",
+                        "payload": f"Requested unsupported tool '{tool_name}'. Available tools were provided in prompt.",
+                        "tool_name": "",
+                        "arguments": {},
+                    }
+                return {
+                    "action": "tool",
+                    "payload": "",
+                    "tool_name": tool_name,
+                    "arguments": arguments,
+                }
+        if action == "final":
+            response = str(parsed.get("response", "")).strip()
+            return {"action": "final", "payload": response or fallback, "tool_name": "", "arguments": {}}
+
+    lowered = stripped.lower()
+    if lowered.startswith("tool:"):
+        payload = stripped.split(":", 1)[1].strip()
+        if payload:
+            if not prompt_requests_tool(payload):
+                return {"action": "final", "payload": payload, "tool_name": "", "arguments": {}}
+            return {"action": "tool", "payload": payload, "tool_name": "", "arguments": {}}
+    if lowered.startswith("final:"):
+        payload = stripped.split(":", 1)[1].strip()
+        if payload:
+            return {"action": "final", "payload": payload, "tool_name": "", "arguments": {}}
+    return {"action": "final", "payload": stripped or fallback, "tool_name": "", "arguments": {}}
+
+
+def _evaluate_progress_guardrails(
+    *,
+    next_action_key: str,
+    action_history: list[str],
+    output_signatures: list[str],
+) -> dict[str, str] | None:
+    recent_actions = action_history[-2:]
+    if len(recent_actions) == 2 and recent_actions[0] == recent_actions[1] == next_action_key:
+        return {
+            "status": "no_progress",
+            "response": f"Stopping to avoid repeating the same tool action: {next_action_key}",
+            "stop_reason": "repeated_tool",
+        }
+
+    if len(output_signatures) >= 2 and output_signatures[-1] == output_signatures[-2]:
+        return {
+            "status": "no_progress",
+            "response": "Stopping because consecutive tool outputs are unchanged (no progress detected).",
+            "stop_reason": "no_progress",
+        }
+
+    return None
+
+
+def _output_signature(tool_name: str, output: str) -> str:
+    # Cheap signature for loop progress checks.
+    normalized = " ".join(output.split())[:220]
+    return f"{tool_name}::{normalized}"
+
+
+def _finalize_result(
+    *,
+    status: str,
+    response: str,
+    steps: list[dict],
+    tools: list[dict],
+    stop_reason: str,
+) -> dict:
+    return {
+        "status": status,
+        "response": response,
+        "steps": steps,
+        "tools": tools,
+        "tool": tools[-1]["tool_name"] if tools else None,
+        "tool_status": tools[-1]["status"] if tools else None,
+        "stop_reason": stop_reason,
+    }
+
+
+def _available_tools_for_prompt(mcp_manager: MCPManager | None) -> str:
+    dynamic = {}
+    if mcp_manager is not None:
         try:
-            direct = manager.generate(prompt=direct_prompt, provider_override=provider_override)
-            return {"action": "final", "payload": direct.content}
-        except (ProviderError, ProviderSelectionError) as exc:
-            return {"action": "final", "payload": f"LLM error: {exc}"}
+            dynamic = mcp_manager.available_tools()
+        except Exception:
+            dynamic = {}
 
-    if text.lower().startswith("tool:"):
-        payload = text.split(":", 1)[1].strip()
-        if payload:
-            return {"action": "tool", "payload": payload}
-    if text.lower().startswith("final:"):
-        payload = text.split(":", 1)[1].strip()
-        if payload:
-            return {"action": "final", "payload": payload}
+    rows: list[str] = []
+    for spec in supported_tool_specs():
+        rows.append(f"- {spec['name']}: {spec['description']} args={json.dumps(spec['arguments'], ensure_ascii=True)}")
+    if dynamic:
+        rows.append(f"- dynamic_mcp_tools={json.dumps(dynamic, ensure_ascii=True)}")
+    return "\n".join(rows)
 
-    # Default to a direct answer if tool-selection format is not followed.
-    return {"action": "final", "payload": text}
+
+def _parse_json_payload(text: str) -> dict | None:
+    # Accept plain JSON or JSON wrapped in markdown code fences.
+    candidates = [text]
+    if "```" in text:
+        inner = text
+        inner = inner.replace("```json", "```").replace("```JSON", "```")
+        parts = [p.strip() for p in inner.split("```") if p.strip()]
+        candidates.extend(parts)
+    for candidate in candidates:
+        try:
+            value = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _is_supported_tool_name(tool_name: str) -> bool:
+    names = {spec["name"] for spec in supported_tool_specs()}
+    return normalize_tool_name(tool_name) in names
+
+
+def _assert_tool_executable(*, tool_name: str, mcp_manager: MCPManager | None) -> None:
+    if mcp_manager is None:
+        return
+    normalized = normalize_tool_name(tool_name)
+    if normalized.startswith("fs."):
+        server = "filesystem"
+    elif normalized.startswith("knowledge."):
+        server = "local_knowledge"
+    elif normalized.startswith("web."):
+        server = "web_search"
+    else:
+        return
+    diag = mcp_manager.diagnostics().get(server)
+    if diag is None:
+        return
+    if not diag.connected or not diag.executable:
+        detail = diag.executable_detail or diag.startup_error or "server not executable"
+        raise ToolExecutionError(f"MCP server '{server}' is unavailable: {detail}")
+
+
+def _emit_debug(debug_fn: Callable[[str], None] | None, message: str) -> None:
+    if debug_fn is not None:
+        debug_fn(message)

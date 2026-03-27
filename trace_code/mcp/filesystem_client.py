@@ -11,11 +11,12 @@ class MCPClientError(RuntimeError):
 
 
 class FilesystemMCPClient:
-    def __init__(self, command: list[str], workspace_root: Path):
+    def __init__(self, command: list[str], workspace_root: Path, env: dict[str, str] | None = None):
         if not command:
             raise MCPClientError("filesystem MCP command is empty")
         self.command = [*command, str(workspace_root)]
         self.workspace_root = workspace_root
+        self.env = env
         self.process: subprocess.Popen | None = None
         self._next_id = 1
         self._tool_name_cache: set[str] | None = None
@@ -38,6 +39,7 @@ class FilesystemMCPClient:
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,
+                env=self.env,
             )
         except OSError as exc:
             raise MCPClientError(f"failed to start filesystem MCP server: {exc}") from exc
@@ -63,6 +65,12 @@ class FilesystemMCPClient:
         tool_name = self._select_tool_name(("read_file", "readFile"))
         result = self._call_tool(tool_name, {"path": str(file_path)})
         return _tool_result_text(result)
+
+    def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self._call_tool(tool_name, arguments)
+
+    def list_tools(self) -> list[str]:
+        return sorted(self._list_tool_names())
 
     def _initialize(self) -> None:
         self._request(

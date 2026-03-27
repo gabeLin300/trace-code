@@ -10,10 +10,11 @@ class WebSearchMCPClientError(RuntimeError):
 
 
 class WebSearchMCPClient:
-    def __init__(self, command: list[str]):
+    def __init__(self, command: list[str], env: dict[str, str] | None = None):
         if not command:
             raise WebSearchMCPClientError("web search MCP command is empty")
         self.command = command
+        self.env = env
         self.process: subprocess.Popen | None = None
         self._next_id = 1
         self._tool_name_cache: set[str] | None = None
@@ -36,6 +37,7 @@ class WebSearchMCPClient:
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,
+                env=self.env,
             )
         except OSError as exc:
             raise WebSearchMCPClientError(f"failed to start web search MCP server: {exc}") from exc
@@ -62,6 +64,12 @@ class WebSearchMCPClient:
                 "search_depth": search_depth,
             },
         )
+
+    def list_tools(self) -> list[str]:
+        return sorted(self._list_tool_names())
+
+    def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self._call_tool(tool_name, arguments)
 
     def _initialize(self) -> None:
         self._request(

@@ -43,3 +43,7 @@ pip-wheel-metadata/
 # Misc logs/temp
 *.log
 tmp/
+.tmp/
+.tmp2/
+.tmp_run/
+pytest-cache-files-*/

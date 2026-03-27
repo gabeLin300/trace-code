@@ -21,6 +21,7 @@ Define the high-level architecture for `trace`, a modular CLI coding assistant t
 - Uses a bounded autonomous loop: context build -> tool/answer decision -> execute -> iterate until done/limit.
 - Supports no-tool and tool-call branches.
 - Includes planning capability for multi-step tasks.
+- Emits explicit loop stop reasons for observability and safety guardrail evidence.
 
 3. **Context and Session Management**
 - Persists session state in `.assistant/sessions/` as JSON.

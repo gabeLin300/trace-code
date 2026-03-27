@@ -14,7 +14,13 @@ from trace_code.llm.manager import LLMManager
 from trace_code.llm.manager import parse_provider_route
 from trace_code.mcp.manager import MCPManager
 from trace_code.sessions.store import SessionRecord, SessionStore
+from trace_code.utils.timeout import call_with_timeout
 from trace_code.workspace.bootstrap import bootstrap_workspace
+
+# Debug toggle for local demos:
+# Set to False (or uncomment below) to hide [debug] lines.
+CLI_DEBUG = False
+# CLI_DEBUG = False
 
 
 @dataclass
@@ -162,26 +168,52 @@ def _provider_health_text(ctx: CLIContext) -> str:
     tavily_key = _mask_key(os.getenv(settings.web_search.api_key_env_var, ""))
 
     lines = [
+        "[debug] health start",
         f"GROQ_API_KEY={groq_key}",
         f"{settings.web_search.api_key_env_var}={tavily_key}",
         f"default_route={default_route}",
         f"fallback_route={fallback_route}",
     ]
     if ctx.mcp_manager is not None:
-        health = ctx.mcp_manager.health()
+        lines.append("[debug] MCP diagnostics start")
+        diag = ctx.mcp_manager.diagnostics()
         lines.append(
             "mcp_health="
-            f"filesystem:{health.filesystem},"
-            f"local_knowledge:{health.local_knowledge},"
-            f"web_search:{health.web_search}"
+            f"filesystem:{diag['filesystem'].connected},"
+            f"local_knowledge:{diag['local_knowledge'].connected},"
+            f"web_search:{diag['web_search'].connected}"
         )
+        for server_name in ("filesystem", "local_knowledge", "web_search"):
+            item = diag[server_name]
+            lines.append(
+                f"mcp.{server_name}: connected={item.connected} "
+                f"tools={item.tools} executable={item.executable} detail={item.executable_detail} "
+                f"category={item.failure_category}"
+            )
+            lines.append(
+                f"mcp.{server_name}.launch_command={item.launch_command} "
+                f"python={item.python_executable} venv={item.virtual_env or '(none)'}"
+            )
+            if item.startup_error:
+                lines.append(f"mcp.{server_name}.startup_error={item.startup_error}")
+                lines.append(f"mcp.{server_name}.remediation={item.remediation}")
+        lines.append("[debug] MCP diagnostics end")
 
     for label, route in (("default", default_route), ("fallback", fallback_route)):
+        lines.append(f"[debug] provider invocation start: {label}")
         try:
-            res = manager.generate("health check", provider_override=route)
+            ok, res, err = call_with_timeout(
+                lambda: manager.generate("health check", provider_override=route),
+                timeout_s=20.0,
+            )
+            if not ok:
+                raise ProviderError(f"provider timeout/error: {err}")
             lines.append(f"{label}: ok ({res.provider}:{res.model})")
         except (ProviderError, ProviderSelectionError) as exc:
             lines.append(f"{label}: error ({route}) -> {exc}")
+        lines.append(f"[debug] provider invocation end: {label}")
+
+    lines.append("[debug] health end")
 
     return "\n".join(lines)
 
@@ -205,6 +237,7 @@ def run_interactive_session(
     session_id: str = "default",
 ) -> SessionRecord:
     ctx = _init_context(settings, no_banner=no_banner, session_id=session_id, start_mcp=True)
+    first_request_done = False
 
     if ctx.banner:
         output_fn(ctx.banner)
@@ -216,26 +249,60 @@ def run_interactive_session(
             user_input = input_fn().strip()
             if not user_input:
                 continue
+            _debug(output_fn, f"command received: {user_input}")
+
+            if not first_request_done and ctx.mcp_manager is not None:
+                _debug(output_fn, "first-request MCP warmup start")
+                warm = ctx.mcp_manager.prime()
+                _debug(output_fn, f"first-request MCP warmup end: {warm}")
+                first_request_done = True
 
             ctx.session.command_history.append(user_input)
             route = route_user_input(user_input)
+            _debug(output_fn, f"command routing: {route}")
 
             if route == "builtin":
+                _debug(output_fn, "builtin handler start")
                 text, should_exit = _handle_builtin(user_input, ctx)
+                _debug(output_fn, "builtin handler end")
                 output_fn(text)
                 ctx.store.save(ctx.session)
                 if should_exit:
                     break
                 continue
 
-            result = run_agentic_task(
-                user_input=user_input,
-                settings=ctx.settings,
-                mcp_manager=ctx.mcp_manager,
-            )
+            _debug(output_fn, "agent loop start")
+            try:
+                result = run_agentic_task(
+                    user_input=user_input,
+                    settings=ctx.settings,
+                    mcp_manager=ctx.mcp_manager,
+                    debug_fn=lambda msg: _debug(output_fn, msg),
+                )
+            except Exception as exc:
+                _debug(output_fn, f"agent loop exception: {exc}")
+                output_fn("[loop] stop_reason=error")
+                output_fn(f"Agent loop failed: {exc}")
+                continue
+            _debug(output_fn, "agent loop end")
             response = result["response"]
+            stop_reason = result.get("stop_reason")
+            route = parse_provider_route(ctx.settings.llm.default)
+            output_fn(f"[loop] provider={route.provider} model={route.model}")
             for tool_step in result.get("tools", []):
-                output_fn(f"\n[{tool_step.get('step')}] calling tool: {tool_step.get('tool_name')}\n")
+                tool_name = tool_step.get("tool_name")
+                server = _tool_server_name(str(tool_name or ""))
+                args = tool_step.get("arguments", {})
+                required = bool(tool_step.get("confirmation_required", False))
+                status = str(tool_step.get("status", "unknown"))
+                summary = _summarize_tool_output(str(tool_step.get("output", "")))
+                output_fn(
+                    f"[loop step {tool_step.get('step')}] tool={tool_name} "
+                    f"server={server} status={status} args={args} confirmation_required={required}"
+                )
+                output_fn(f"[loop step {tool_step.get('step')}] result_or_blocked={summary}")
+            if stop_reason:
+                output_fn(f"[loop] stop_reason={stop_reason}")
 
             ctx.session.chat_history.append({"role": "user", "content": user_input})
             ctx.session.chat_history.append({"role": "assistant", "content": response})
@@ -264,3 +331,32 @@ def run_interactive_session(
             ctx.mcp_manager.close()
 
     return ctx.session
+
+
+def _summarize_tool_output(output: str, limit: int = 160) -> str:
+    text = " ".join(output.split())
+    if not text:
+        return "(empty)"
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
+
+
+def _debug(output_fn: Callable[[str], None], message: str) -> None:
+    if CLI_DEBUG:
+        output_fn(f"[debug] {message}")
+
+
+def _tool_server_name(tool_name: str) -> str:
+    normalized = tool_name.strip().lower()
+    if normalized.startswith("fs."):
+        return "filesystem"
+    if normalized.startswith("knowledge."):
+        return "local_knowledge"
+    if normalized.startswith("web."):
+        return "web_search"
+    if normalized == "mcp.call":
+        return "dynamic_mcp"
+    if normalized.startswith("shell."):
+        return "local_shell"
+    return "unknown"
