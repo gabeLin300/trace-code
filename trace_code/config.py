@@ -23,7 +23,7 @@ class MCPSettings:
     local_knowledge_server_command: str = "python -m trace_code.mcp.local_knowledge_server"
     web_search_server_command: str = "python -m trace_code.mcp.web_search_server --no-prompt"
     startup_timeout_s: float = 8.0
-    tools_timeout_s: float = 3.0
+    tools_timeout_s: float = 10.0
     operation_timeout_s: float = 20.0
 
     def filesystem_server_argv(self) -> list[str]:
