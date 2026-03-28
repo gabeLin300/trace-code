@@ -26,7 +26,7 @@ def run_agentic_task(
     settings: TraceSettings | None = None,
     provider_override: str | None = None,
     mcp_manager: MCPManager | None = None,
-    max_steps: int = 4,
+    max_steps: int = 6,
     debug_fn: Callable[[str], None] | None = None,
 ) -> dict:
     """Run a bounded autonomous loop with explicit planner/executor/evaluator stages."""
@@ -63,23 +63,42 @@ def run_agentic_task(
                 used_tools=bool(tools),
             )
             steps.append({"step": step_idx, "kind": "evaluation", "phase": "final", **final_eval})
-            if (
-                not final_eval["is_complete"]
-                and step_idx < max_steps
-                and prompt_requests_tool(user_input)
-            ):
-                # Keep autonomy: when final response looks incomplete for a tool-oriented goal,
-                # force one tool-attempt from the original request before giving up.
-                decision = {"action": "tool", "payload": user_input, "tool_name": "", "arguments": {}}
-                steps.append(
-                    {
-                        "step": step_idx,
-                        "kind": "decision_override",
-                        "reason": "final_response_incomplete_for_tool_goal",
-                        "action": "tool",
-                        "payload": user_input,
-                    }
+            if not final_eval["is_complete"] and step_idx < max_steps:
+                recovery = _recover_from_incomplete_final(
+                    manager=manager,
+                    user_input=user_input,
+                    partial_response=str(decision.get("payload", "")),
+                    latest_tool_name=latest_tool_name,
+                    latest_tool_output=latest_tool_output,
+                    settings=settings,
+                    provider_override=provider_override,
+                    mcp_manager=mcp_manager,
+                    unmet_requirements=list(final_eval.get("unmet_requirements", [])),
+                    debug_fn=debug_fn,
                 )
+                if recovery["action"] == "tool":
+                    decision = recovery
+                    steps.append(
+                        {
+                            "step": step_idx,
+                            "kind": "decision_override",
+                            "reason": "final_response_incomplete",
+                            "action": "tool",
+                            "tool_name": recovery.get("tool_name", ""),
+                            "arguments": recovery.get("arguments", {}),
+                            "payload": recovery.get("payload", ""),
+                        }
+                    )
+                else:
+                    _emit_debug(debug_fn, f"loop step {step_idx} finalize done")
+                    return _finalize_result(
+                        status="answered" if not tools else "answered_with_tools",
+                        response=decision["payload"],
+                        steps=steps,
+                        tools=tools,
+                        stop_reason="done",
+                        completion=final_eval,
+                    )
             else:
                 _emit_debug(debug_fn, f"loop step {step_idx} finalize done")
                 return _finalize_result(
@@ -372,6 +391,17 @@ def _plan_next_action(
         return {"action": "final", "payload": latest_tool_output or f"LLM error: {exc}"}
 
     decision = _parse_decision_response(text=text, fallback=latest_tool_output or text)
+    if _needs_decision_repair(raw_text=text, decision=decision):
+        repaired = _repair_decision_response(
+            manager=manager,
+            raw_text=text,
+            fallback=latest_tool_output or text,
+            settings=settings,
+            provider_override=provider_override,
+            mcp_manager=mcp_manager,
+            debug_fn=debug_fn,
+        )
+        decision = repaired
     if is_first_step and prompt_requests_tool(user_input) and decision["action"] == "final":
         return {"action": "tool", "payload": user_input, "tool_name": "", "arguments": {}}
     return decision
@@ -380,9 +410,10 @@ def _plan_next_action(
 def _decision_prompt(*, user_input: str, latest_tool_name: str, latest_tool_output: str, stage: str, available_tools: str) -> str:
     return (
         "You are deciding the action for an autonomous coding assistant.\n"
-        "Return a single JSON object with one of these shapes:\n"
+        "Return ONLY a single JSON object with one of these shapes:\n"
         '{"action":"tool","tool":"<tool_name>","arguments":{...}}\n'
         '{"action":"final","response":"<final user-facing answer>"}\n'
+        "Do not include markdown fences or prose.\n"
         "If you need tools, choose only from the available tool list below.\n\n"
         "When using a dynamically discovered MCP tool, call tool='mcp.call' with:\n"
         '{"server":"<server_name>","tool":"<mcp_tool_name>","arguments":{...}}\n\n'
@@ -400,8 +431,12 @@ def _parse_decision_response(*, text: str, fallback: str) -> dict[str, str]:
     if isinstance(parsed, dict):
         action = str(parsed.get("action", "")).strip().lower()
         if action == "tool":
-            tool_name = str(parsed.get("tool", "")).strip()
+            tool_name = str(parsed.get("tool", "") or parsed.get("tool_name", "")).strip()
             arguments = parsed.get("arguments", {})
+            if isinstance(arguments, str):
+                parsed_arguments = _parse_json_payload(arguments)
+                if isinstance(parsed_arguments, dict):
+                    arguments = parsed_arguments
             if isinstance(arguments, dict):
                 if tool_name and not _is_supported_tool_name(tool_name):
                     return {
@@ -417,7 +452,7 @@ def _parse_decision_response(*, text: str, fallback: str) -> dict[str, str]:
                     "arguments": arguments,
                 }
         if action == "final":
-            response = str(parsed.get("response", "")).strip()
+            response = str(parsed.get("response", "") or parsed.get("final", "")).strip()
             return {"action": "final", "payload": response or fallback, "tool_name": "", "arguments": {}}
 
     lowered = stripped.lower()
@@ -432,6 +467,64 @@ def _parse_decision_response(*, text: str, fallback: str) -> dict[str, str]:
         if payload:
             return {"action": "final", "payload": payload, "tool_name": "", "arguments": {}}
     return {"action": "final", "payload": stripped or fallback, "tool_name": "", "arguments": {}}
+
+
+def _recover_from_incomplete_final(
+    *,
+    manager: LLMManager,
+    user_input: str,
+    partial_response: str,
+    latest_tool_name: str,
+    latest_tool_output: str,
+    settings: TraceSettings,
+    provider_override: str | None,
+    mcp_manager: MCPManager | None,
+    unmet_requirements: list[str],
+    debug_fn: Callable[[str], None] | None = None,
+) -> dict[str, str]:
+    available_tools = _available_tools_for_prompt(mcp_manager)
+    unmet = ", ".join(unmet_requirements) if unmet_requirements else "none"
+    prompt = (
+        "The previous FINAL answer is incomplete.\n"
+        "Return ONLY JSON with one of:\n"
+        '{"action":"tool","tool":"<tool_name>","arguments":{...}}\n'
+        '{"action":"final","response":"<improved final answer>"}\n\n'
+        "Prefer action=tool when additional evidence is needed.\n"
+        "Choose tools only from this list:\n"
+        f"{available_tools}\n\n"
+        f"User goal:\n{user_input}\n\n"
+        f"Previous incomplete answer:\n{partial_response}\n\n"
+        f"Latest tool name:\n{latest_tool_name}\n\n"
+        f"Latest tool output:\n{latest_tool_output}\n\n"
+        f"Unmet requirements:\n{unmet}\n"
+    )
+    augmented = build_augmented_prompt(
+        prompt,
+        settings=settings,
+        workspace_root=Path(settings.workspace_root),
+        mcp_manager=mcp_manager,
+    )
+    try:
+        _emit_debug(debug_fn, "recovery planner invocation start")
+        ok, response, err = call_with_timeout(
+            lambda: manager.generate(prompt=augmented, provider_override=provider_override),
+            timeout_s=45.0,
+        )
+        _emit_debug(debug_fn, "recovery planner invocation end")
+        if not ok:
+            raise ProviderError(f"recovery planner timeout/error: {err}")
+        repaired = _parse_decision_response(text=response.content.strip(), fallback=partial_response)
+        if repaired["action"] == "tool":
+            return repaired
+        if repaired["action"] == "final":
+            return repaired
+    except Exception as exc:
+        _emit_debug(debug_fn, f"recovery planner failed: {exc}")
+
+    # Conservative fallback: only force a tool when the original task appears tool-oriented.
+    if prompt_requests_tool(user_input):
+        return {"action": "tool", "payload": user_input, "tool_name": "", "arguments": {}}
+    return {"action": "final", "payload": partial_response, "tool_name": "", "arguments": {}}
 
 
 def _evaluate_progress_guardrails(
@@ -519,6 +612,58 @@ def _parse_json_payload(text: str) -> dict | None:
         if isinstance(value, dict):
             return value
     return None
+
+
+def _needs_decision_repair(*, raw_text: str, decision: dict[str, str]) -> bool:
+    if decision.get("action") == "tool":
+        return False
+    raw = raw_text.strip().lower()
+    if not raw:
+        return False
+    if raw.startswith("{") or raw.startswith("tool:") or raw.startswith("final:"):
+        return False
+    # If the model ignored the structured contract and returned prose,
+    # run a one-shot repair step to recover a valid action JSON.
+    return True
+
+
+def _repair_decision_response(
+    *,
+    manager: LLMManager,
+    raw_text: str,
+    fallback: str,
+    settings: TraceSettings,
+    provider_override: str | None,
+    mcp_manager: MCPManager | None,
+    debug_fn: Callable[[str], None] | None = None,
+) -> dict[str, str]:
+    repair_prompt = (
+        "Rewrite the following planner output as a strict JSON action object.\n"
+        "Return ONLY JSON in one shape:\n"
+        '{"action":"tool","tool":"<tool_name>","arguments":{...}}\n'
+        '{"action":"final","response":"<final user-facing answer>"}\n\n'
+        "Original output:\n"
+        f"{raw_text}\n"
+    )
+    augmented = build_augmented_prompt(
+        repair_prompt,
+        settings=settings,
+        workspace_root=Path(settings.workspace_root),
+        mcp_manager=mcp_manager,
+    )
+    try:
+        _emit_debug(debug_fn, "decision repair invocation start")
+        ok, response, err = call_with_timeout(
+            lambda: manager.generate(prompt=augmented, provider_override=provider_override),
+            timeout_s=25.0,
+        )
+        _emit_debug(debug_fn, "decision repair invocation end")
+        if not ok:
+            raise ProviderError(f"decision repair timeout/error: {err}")
+        return _parse_decision_response(text=response.content.strip(), fallback=fallback)
+    except Exception as exc:
+        _emit_debug(debug_fn, f"decision repair failed: {exc}")
+        return _parse_decision_response(text=raw_text, fallback=fallback)
 
 
 def _is_supported_tool_name(tool_name: str) -> bool:
